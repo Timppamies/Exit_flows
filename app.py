@@ -5,7 +5,6 @@ import eurostat
 import plotly.express as px
 from datetime import datetime, timedelta
 import warnings
-import time
 
 warnings.filterwarnings("ignore")
 
@@ -60,35 +59,36 @@ def fetch_eurostat_consumption():
         return pd.DataFrame(columns=['Month', 'Combined Regional Consumption'])
 
 
-# --- 2. ENTSOG DATA: Luotettava kuukausipätkitys ---
+# --- 2. ENTSOG DATA: Suodatus suoraan maiden mukaan (LV, LT) ---
 @st.cache_data(ttl=86400, show_spinner=False)
-def fetch_entsog_demand_chunk(from_str, to_str):
+def fetch_entsog_demand_country(country_code, start_date_str, end_date_str):
     """
-    Hakee yhden kuukauden (30 pv) pätkän kerrallaan.
-    ENTSOG API vaatii lyhyen aikavälin, jotta se palauttaa dataa luotettavasti.
+    Hakee tietyn maan (LV tai LT) exit-virrat yhdellä nopealla pyynnöllä.
+    Maakoodi (operatorCountryKey) rajaa API-vastauksen vain Inčukalnsiin ja GIPL/Kiemenai-pisteisiin.
     """
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
     offset = 0
     limit = 5000
-    chunk_data = []
+    records = []
     
     while True:
         params = {
             'indicator': 'Physical Flow',
-            'from': from_str,
-            'to': to_str,
+            'from': start_date_str,
+            'to': end_date_str,
             'limit': limit,
             'offset': offset,
-            'directionKey': 'exit'
+            'directionKey': 'exit',
+            'operatorCountryKey': country_code  # Rajataan vain LV tai LT
         }
         
         try:
-            response = requests.get(url, params=params, timeout=12)
+            response = requests.get(url, params=params, timeout=15)
             if response.status_code == 200:
                 data = response.json().get('operationalData', [])
                 if not data:
                     break
-                chunk_data.extend(data)
+                records.extend(data)
                 if len(data) < limit:
                     break
                 offset += limit
@@ -97,31 +97,27 @@ def fetch_entsog_demand_chunk(from_str, to_str):
         except Exception:
             break
             
-    return chunk_data
+    return records
 
 
-@st.cache_data(ttl=86400, show_spinner="Loading ENTSOG gas demand history into memory...")
+@st.cache_data(ttl=86400, show_spinner="Fast loading 24-month ENTSOG gas demand flows...")
 def fetch_full_entsog_history():
     """
-    Kokoaa 24 kuukauden historiatiedot 30 päivän blokkeina.
-    Suoritetaan vain kerran, jonka jälkeen slider toimii viiveettömästi.
+    Haetaan vain Latvian (Inčukalns) ja Liettuan (GIPL) exit-virrat 24 kuukaudelta.
+    Tämä suoritetaan sekunneissa.
     """
     today = datetime.today()
     first_day_current_month = today.replace(day=1)
     start_dt = (first_day_current_month - timedelta(days=24 * 31)).replace(day=1)
     
-    current_start = start_dt
-    all_records = []
+    start_date_str = start_dt.strftime('%Y-%m-%d')
+    end_date_str = today.strftime('%Y-%m-%d')
     
-    while current_start < today:
-        current_end = min(current_start + timedelta(days=30), today)
-        from_str = current_start.strftime('%Y-%m-%d')
-        to_str = current_end.strftime('%Y-%m-%d')
-        
-        chunk = fetch_entsog_demand_chunk(from_str, to_str)
-        all_records.extend(chunk)
-        
-        current_start = current_end + timedelta(days=1)
+    all_records = []
+    # Haetaan vain maakohtaiset exit-virrat (Latvia + Liettua)
+    for country in ['LV', 'LT']:
+        country_data = fetch_entsog_demand_country(country, start_date_str, end_date_str)
+        all_records.extend(country_data)
         
     return pd.DataFrame(all_records)
 
@@ -152,7 +148,7 @@ if st.sidebar.button("Clear Cache & Refresh 🔄"):
     st.cache_data.clear()
     st.rerun()
 
-# Haetaan data taustalle
+# Datan haku taustalle
 df_consumption = fetch_eurostat_consumption()
 df_entsog_raw = fetch_full_entsog_history()
 
@@ -187,7 +183,7 @@ else:
             if col not in combined_df.columns:
                 combined_df[col] = 0.0
                 
-        # Slider-leikkaus muistissa olevasta aineistosta
+        # Slider-leikkaus muistissa olevasta aineistosta (0 ms)
         df_display = combined_df[demand_cols].tail(months_to_show)
         
         # --- KPI-KORTIT ---
