@@ -59,9 +59,13 @@ def fetch_eurostat_consumption():
         return pd.DataFrame(columns=['Month', 'Combined Regional Consumption'])
 
 
-# --- 2. ENTSOG DATA: Välimuistitetaan 14-päivän pätkät ---
+# --- 2. ENTSOG DATA: Pätkävälimuisti (Kuukauden jaksot) ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_entsog_demand_chunk(from_str, to_str):
+    """
+    Haetaan kuukauden pätkä kerrallaan.
+    Välimuistitus estää uudelleenlataukset kertaalleen haetuilta jaksoilta.
+    """
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
     offset = 0
     limit = 5000
@@ -94,11 +98,11 @@ def fetch_entsog_demand_chunk(from_str, to_str):
             
     return chunk_data
 
-@st.cache_data(ttl=86400, show_spinner="Loading full ENTSOG dataset into memory...")
+@st.cache_data(ttl=86400, show_spinner="Fetching ENTSOG gas demand flows (24 months)...")
 def fetch_full_entsog_history():
     """
-    Haetaan aina kerralla 24 kuukauden historia välimuistiin.
-    Näin sliderin muuttaminen ei suorita enää mitään hakuja.
+    Kokoaa 24 kuukauden historiatiedot kuukauden (30 pv) erissä.
+    Tämä suoritetaan vain kerran 24 tunnissa.
     """
     today = datetime.today()
     first_day_current_month = today.replace(day=1)
@@ -107,8 +111,9 @@ def fetch_full_entsog_history():
     current_start = start_dt
     all_records = []
     
+    # Haetaan 30 päivän blokkeina 14 päivän sijaan (puolittaa pyyntöjen määrän)
     while current_start < today:
-        current_end = min(current_start + timedelta(days=14), today)
+        current_end = min(current_start + timedelta(days=30), today)
         from_str = current_start.strftime('%Y-%m-%d')
         to_str = current_end.strftime('%Y-%m-%d')
         
@@ -146,14 +151,14 @@ if st.sidebar.button("Clear Cache & Refresh 🔄"):
     st.cache_data.clear()
     st.rerun()
 
-# 1. Haetaan täysi aineisto muistiin (vain kerran, myöhemmät haut suoraan välimuistista)
+# Haetaan koko historia muistiin taustalla (tapahtuu vain kerran, ei kaadu sliderista)
 df_consumption = fetch_eurostat_consumption()
 df_entsog_raw = fetch_full_entsog_history()
 
 if df_entsog_raw.empty:
     st.warning("No flow data retrieved from ENTSOG. Please try clicking 'Clear Cache & Refresh'.")
 else:
-    # 2. Käsitellään ENTSOG-data
+    # Luokitellaan exit-virrat
     df_entsog_raw['Category'] = df_entsog_raw.apply(classify_demand_flow, axis=1)
     df_entsog_filtered = df_entsog_raw.dropna(subset=['Category']).copy()
     
@@ -163,7 +168,7 @@ else:
         date_candidates = ['periodFrom', 'gasDayStart', 'periodStart', 'gasDayStartedOn']
         date_col = next((c for c in date_candidates if c in df_entsog_filtered.columns), None)
         if not date_col:
-            date_col = next((c for c in df_filtered.columns if 'period' in c.lower() or 'date' in c.lower()), None)
+            date_col = next((c for c in df_entsog_filtered.columns if 'period' in c.lower() or 'date' in c.lower()), None)
 
         df_entsog_filtered['value'] = pd.to_numeric(df_entsog_filtered['value'], errors='coerce').fillna(0)
         df_entsog_filtered['Date_Parsed'] = pd.to_datetime(df_entsog_filtered[date_col], utc=True)
@@ -183,7 +188,7 @@ else:
             if col not in combined_df.columns:
                 combined_df[col] = 0.0
                 
-        # 3. LEIKKAUKSEN SUORITUS (Tapahtuu silmänräpäyksessä muistista)
+        # Slider vain leikkaa valmiiksi muistissa olevaa taulukkoa (0 viivettä, ei kaadu)
         df_display = combined_df[demand_cols].tail(months_to_show)
         
         # --- KPI-KORTIT ---
