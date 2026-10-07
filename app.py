@@ -61,41 +61,52 @@ def fetch_eurostat_consumption():
 
 # --- 2. ENTSOG DATA: Pätkävälimuisti (Kuukauden jaksot) ---
 @st.cache_data(ttl=86400, show_spinner=False)
+# Määritetään tarvittavat ENTSOG-pisteet (Inčukalns UGS injection + GIPL Santaka exit)
+TARGET_DEMAND_POINTS = [
+    'LV-TP-0001', # Inčukalns UGS
+    'LT-TP-0002'  # GIPL Santaka (LT -> PL)
+]
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_entsog_demand_chunk(from_str, to_str):
     """
-    Haetaan kuukauden pätkä kerrallaan.
-    Välimuistitus estää uudelleenlataukset kertaalleen haetuilta jaksoilta.
+    Hakee vain FinBalt-kysynnän kannalta oleelliset exit-pisteet.
+    Suodatus suoraan API-tasolla lyhentää latausajan minuuteista sekunteihin.
     """
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
-    offset = 0
-    limit = 5000
     chunk_data = []
     
-    while True:
-        params = {
-            'indicator': 'Physical Flow',
-            'from': from_str,
-            'to': to_str,
-            'limit': limit,
-            'offset': offset,
-            'directionKey': 'exit'
-        }
+    # Tehdään täsmähaku vain valituille pisteille
+    for point in TARGET_DEMAND_POINTS:
+        offset = 0
+        limit = 5000
         
-        try:
-            response = requests.get(url, params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json().get('operationalData', [])
-                if not data:
-                    break
-                chunk_data.extend(data)
-                if len(data) < limit:
-                    break
-                offset += limit
-            else:
-                break
-        except Exception:
-            break
+        while True:
+            params = {
+                'indicator': 'Physical Flow',
+                'from': from_str,
+                'to': to_str,
+                'limit': limit,
+                'offset': offset,
+                'directionKey': 'exit',
+                'pointKey': point  # Tärkeä: hakee vain Inčukalnsin tai GIPL:n dataa
+            }
             
+            try:
+                response = requests.get(url, params=params, timeout=10)
+                if response.status_code == 200:
+                    data = response.json().get('operationalData', [])
+                    if not data:
+                        break
+                    chunk_data.extend(data)
+                    if len(data) < limit:
+                        break
+                    offset += limit
+                else:
+                    break
+            except Exception:
+                break
+                
     return chunk_data
 
 @st.cache_data(ttl=86400, show_spinner="Fetching ENTSOG gas demand flows (24 months)...")
