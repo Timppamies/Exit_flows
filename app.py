@@ -14,6 +14,13 @@ st.set_page_config(
     layout="wide"
 )
 
+# Inčukalns UGS + GIPL / Kiemenai exit -pisteet
+TARGET_EXIT_POINTS = [
+    'LV-TP-0001', # Inčukalns UGS (Injection)
+    'LT-TP-0002', # GIPL Santaka Exit (LT -> PL)
+    'LT-TP-0001'  # Kiemenai / GIPL vaihtoehtoinen tunniste
+]
+
 # --- 1. EUROSTAT DATA: Alueellinen Kulutus ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_eurostat_consumption():
@@ -59,66 +66,56 @@ def fetch_eurostat_consumption():
         return pd.DataFrame(columns=['Month', 'Combined Regional Consumption'])
 
 
-# --- 2. ENTSOG DATA: Suodatus suoraan maiden mukaan (LV, LT) ---
+# --- 2. ENTSOG DATA: Pätkävälimuisti (30 pv) per piste ---
 @st.cache_data(ttl=86400, show_spinner=False)
-def fetch_entsog_demand_country(country_code, start_date_str, end_date_str):
+def fetch_entsog_demand_chunk(from_str, to_str, point_key):
     """
-    Hakee tietyn maan (LV tai LT) exit-virrat yhdellä nopealla pyynnöllä.
-    Maakoodi (operatorCountryKey) rajaa API-vastauksen vain Inčukalnsiin ja GIPL/Kiemenai-pisteisiin.
+    Hakee tietyn pisteen 30 päivän pätkän. 
+    30pv pätkä pysyy alle API:n 5000 rivin rajan eikä leikkaannu kesken.
     """
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
-    offset = 0
-    limit = 5000
-    records = []
+    params = {
+        'indicator': 'Physical Flow',
+        'from': from_str,
+        'to': to_str,
+        'limit': 5000,
+        'directionKey': 'exit',
+        'pointKey': point_key
+    }
     
-    while True:
-        params = {
-            'indicator': 'Physical Flow',
-            'from': start_date_str,
-            'to': end_date_str,
-            'limit': limit,
-            'offset': offset,
-            'directionKey': 'exit',
-            'operatorCountryKey': country_code  # Rajataan vain LV tai LT
-        }
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            return response.json().get('operationalData', [])
+    except Exception:
+        pass
         
-        try:
-            response = requests.get(url, params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json().get('operationalData', [])
-                if not data:
-                    break
-                records.extend(data)
-                if len(data) < limit:
-                    break
-                offset += limit
-            else:
-                break
-        except Exception:
-            break
-            
-    return records
+    return []
 
 
-@st.cache_data(ttl=86400, show_spinner="Fast loading 24-month ENTSOG gas demand flows...")
+@st.cache_data(ttl=86400, show_spinner="Loading full ENTSOG demand history...")
 def fetch_full_entsog_history():
     """
-    Haetaan vain Latvian (Inčukalns) ja Liettuan (GIPL) exit-virrat 24 kuukaudelta.
-    Tämä suoritetaan sekunneissa.
+    Kokoaa 24 kuukauden historiatietoa 30 päivän pätkissä kaikille kohdepisteille.
     """
     today = datetime.today()
     first_day_current_month = today.replace(day=1)
     start_dt = (first_day_current_month - timedelta(days=24 * 31)).replace(day=1)
     
-    start_date_str = start_dt.strftime('%Y-%m-%d')
-    end_date_str = today.strftime('%Y-%m-%d')
-    
     all_records = []
-    # Haetaan vain maakohtaiset exit-virrat (Latvia + Liettua)
-    for country in ['LV', 'LT']:
-        country_data = fetch_entsog_demand_country(country, start_date_str, end_date_str)
-        all_records.extend(country_data)
-        
+    
+    for point_key in TARGET_EXIT_POINTS:
+        current_start = start_dt
+        while current_start < today:
+            current_end = min(current_start + timedelta(days=30), today)
+            from_str = current_start.strftime('%Y-%m-%d')
+            to_str = current_end.strftime('%Y-%m-%d')
+            
+            chunk = fetch_entsog_demand_chunk(from_str, to_str, point_key)
+            all_records.extend(chunk)
+            
+            current_start = current_end + timedelta(days=1)
+            
     return pd.DataFrame(all_records)
 
 
@@ -148,7 +145,7 @@ if st.sidebar.button("Clear Cache & Refresh 🔄"):
     st.cache_data.clear()
     st.rerun()
 
-# Datan haku taustalle
+# Datan haku
 df_consumption = fetch_eurostat_consumption()
 df_entsog_raw = fetch_full_entsog_history()
 
@@ -175,6 +172,7 @@ else:
         
         entsog_pivot = entsog_summary.pivot(index='Month', columns='Category', values='Value_TWh').fillna(0)
         
+        # Yhdistetään Eurostatin kulutus ja ENTSOG exit-virrat
         combined_df = pd.merge(df_consumption, entsog_pivot, on='Month', how='inner')
         combined_df.set_index('Month', inplace=True)
         
@@ -183,7 +181,7 @@ else:
             if col not in combined_df.columns:
                 combined_df[col] = 0.0
                 
-        # Slider-leikkaus muistissa olevasta aineistosta (0 ms)
+        # Slider-leikkaus nopeasti muistissa olevasta datasta
         df_display = combined_df[demand_cols].tail(months_to_show)
         
         # --- KPI-KORTIT ---
