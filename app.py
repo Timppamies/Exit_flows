@@ -14,6 +14,13 @@ st.set_page_config(
     layout="wide"
 )
 
+# Määritetään tarvittavat ENTSOG exit-pisteet (Inčukalns UGS injection + GIPL Santaka exit)
+TARGET_DEMAND_POINTS = [
+    'LV-TP-0001', # Inčukalns UGS
+    'LT-TP-0002'  # GIPL Santaka (LT -> PL)
+]
+
+
 # --- 1. EUROSTAT DATA: Alueellinen Kulutus ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_eurostat_consumption():
@@ -59,24 +66,16 @@ def fetch_eurostat_consumption():
         return pd.DataFrame(columns=['Month', 'Combined Regional Consumption'])
 
 
-# --- 2. ENTSOG DATA: Pätkävälimuisti (Kuukauden jaksot) ---
-@st.cache_data(ttl=86400, show_spinner=False)
-# Määritetään tarvittavat ENTSOG-pisteet (Inčukalns UGS injection + GIPL Santaka exit)
-TARGET_DEMAND_POINTS = [
-    'LV-TP-0001', # Inčukalns UGS
-    'LT-TP-0002'  # GIPL Santaka (LT -> PL)
-]
-
+# --- 2. ENTSOG DATA: Pistesuodatettu haku ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_entsog_demand_chunk(from_str, to_str):
     """
-    Hakee vain FinBalt-kysynnän kannalta oleelliset exit-pisteet.
-    Suodatus suoraan API-tasolla lyhentää latausajan minuuteista sekunteihin.
+    Hakee vain FinBalt-kysynnän kannalta oleelliset exit-pisteet (pointKey-suodatus).
+    Latausaika putoaa minuuteista sekunteihin.
     """
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
     chunk_data = []
     
-    # Tehdään täsmähaku vain valituille pisteille
     for point in TARGET_DEMAND_POINTS:
         offset = 0
         limit = 5000
@@ -89,7 +88,7 @@ def fetch_entsog_demand_chunk(from_str, to_str):
                 'limit': limit,
                 'offset': offset,
                 'directionKey': 'exit',
-                'pointKey': point  # Tärkeä: hakee vain Inčukalnsin tai GIPL:n dataa
+                'pointKey': point
             }
             
             try:
@@ -109,11 +108,11 @@ def fetch_entsog_demand_chunk(from_str, to_str):
                 
     return chunk_data
 
+
 @st.cache_data(ttl=86400, show_spinner="Fetching ENTSOG gas demand flows (24 months)...")
 def fetch_full_entsog_history():
     """
-    Kokoaa 24 kuukauden historiatiedot kuukauden (30 pv) erissä.
-    Tämä suoritetaan vain kerran 24 tunnissa.
+    Kokoaa 24 kuukauden historiatiedot kuukauden erissä.
     """
     today = datetime.today()
     first_day_current_month = today.replace(day=1)
@@ -122,7 +121,6 @@ def fetch_full_entsog_history():
     current_start = start_dt
     all_records = []
     
-    # Haetaan 30 päivän blokkeina 14 päivän sijaan (puolittaa pyyntöjen määrän)
     while current_start < today:
         current_end = min(current_start + timedelta(days=30), today)
         from_str = current_start.strftime('%Y-%m-%d')
@@ -162,14 +160,12 @@ if st.sidebar.button("Clear Cache & Refresh 🔄"):
     st.cache_data.clear()
     st.rerun()
 
-# Haetaan koko historia muistiin taustalla (tapahtuu vain kerran, ei kaadu sliderista)
 df_consumption = fetch_eurostat_consumption()
 df_entsog_raw = fetch_full_entsog_history()
 
 if df_entsog_raw.empty:
     st.warning("No flow data retrieved from ENTSOG. Please try clicking 'Clear Cache & Refresh'.")
 else:
-    # Luokitellaan exit-virrat
     df_entsog_raw['Category'] = df_entsog_raw.apply(classify_demand_flow, axis=1)
     df_entsog_filtered = df_entsog_raw.dropna(subset=['Category']).copy()
     
@@ -190,7 +186,6 @@ else:
         
         entsog_pivot = entsog_summary.pivot(index='Month', columns='Category', values='Value_TWh').fillna(0)
         
-        # Yhdistetään Eurostatin kulutus ja ENTSOG exit-virrat
         combined_df = pd.merge(df_consumption, entsog_pivot, on='Month', how='inner')
         combined_df.set_index('Month', inplace=True)
         
@@ -199,7 +194,6 @@ else:
             if col not in combined_df.columns:
                 combined_df[col] = 0.0
                 
-        # Slider vain leikkaa valmiiksi muistissa olevaa taulukkoa (0 viivettä, ei kaadu)
         df_display = combined_df[demand_cols].tail(months_to_show)
         
         # --- KPI-KORTIT ---
