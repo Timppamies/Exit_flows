@@ -8,12 +8,12 @@ import warnings
 warnings.filterwarnings("ignore")
 
 st.set_page_config(
-    page_title="FinBalt Regional Gas Demand - Fixed Country Breakdown",
+    page_title="FinBalt Regional Gas Demand - Final Breakdown",
     page_icon="📊",
     layout="wide"
 )
 
-# --- 1. ENTSOG DATA: Laajennettu haku kaikille operaattoreille ja maakohtaisella varmistuksella ---
+# --- 1. ENTSOG DATA: Nopea operaattoripohjainen haku ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
@@ -69,7 +69,6 @@ def fetch_full_entsog_history():
     start_date_str = start_dt.strftime('%Y-%m-%d')
     end_date_str = today.strftime('%Y-%m-%d')
     
-    # Katetaan kaikki mahdolliset operaattoriavaimet
     operators = {
         'FI-TSO-0001': 'Finland',
         'EE-TSO-0001': 'Estonia',
@@ -84,7 +83,6 @@ def fetch_full_entsog_history():
         records = fetch_entsog_operator_data(op_key, start_date_str, end_date_str)
         for r in records:
             r['Country'] = country_name
-            r['UsedOperatorKey'] = op_key
         all_data.extend(records)
         
     return pd.DataFrame(all_data)
@@ -93,7 +91,6 @@ def fetch_full_entsog_history():
 def classify_demand_flow(row):
     point_key = str(row.get('pointKey', '')).lower()
     point_label = str(row.get('pointLabel', '')).lower()
-    operator_label = str(row.get('operatorLabel', '')).lower()
     direction = str(row.get('directionKey', '')).lower()
     country = row.get('Country', '')
     
@@ -102,22 +99,22 @@ def classify_demand_flow(row):
         if 'incukalns' in point_label or 'inčukalns' in point_label or 'ugs-00029' in point_key:
             return 'Inčukalns UGS (Injection)'
         
-        # 2. GIPL vienti Puolaan (Santaka)
+        # 2. GIPL vienti Puolaan (Santaka) -> Edelleen erillään
         elif 'santaka' in point_label or 'itp-00556' in point_key:
             return 'GIPL Export (LT -> PL)'
             
-        # 3. Rajat ylittävät siirrot (Sakiai, Kiemenai)
-        elif any(x in point_label or x in point_key for x in ['sakiai', 'kiemenai', 'itp-00050', 'itp-00054']):
-            return 'Cross-Border Transit (Sakiai/Kiemenai)'
-            
-        # 4. Tunnistetaan maat varmasti myös operaattorilevelillä tai pisteen nimellä
-        if 'gasgrid' in operator_label or 'finland' in operator_label or country == 'Finland' or 'inkoo' in point_label or 'imatra' in point_label:
+        # 3. Suomen poistumat (mukaan lukien Balticconnector / Inkoo / kansalliset) -> Suomen kulutus
+        elif country == 'Finland' or 'balticconnector' in point_label or 'itp-00550' in point_key:
             return 'Consumption: Finland'
-        elif 'amber grid' in operator_label or 'lithuania' in operator_label or country == 'Lithuania' or 'jaunaičiai' in point_label:
+            
+        # 4. Liettuan poistumat (mukaan lukien Kiemenai, Sakiai ja kotimaiset) -> Liettuan kulutus
+        elif country == 'Lithuania' or 'sakiai' in point_label or 'kiemenai' in point_label or 'itp-00050' in point_label or 'itp-00054' in point_label:
             return 'Consumption: Lithuania'
-        elif 'elering' in operator_label or 'estonia' in operator_label or country == 'Estonia':
+            
+        # 5. Viro ja Latvia omien sääntöjensä mukaan
+        elif country == 'Estonia':
             return 'Consumption: Estonia'
-        elif 'conexus' in operator_label or 'latvia' in operator_label or country == 'Latvia':
+        elif country == 'Latvia':
             return 'Consumption: Latvia'
             
     return None
@@ -125,8 +122,8 @@ def classify_demand_flow(row):
 
 # --- 2. KÄYTTÖLIITTYMÄ (STREAMLIT UI) ---
 
-st.title("📊 FinBalt Regional Gas Demand - Fixed Country Breakdown")
-st.markdown("Gas demand broken down by **Country**, with explicit transit, storage, and export separation.")
+st.title("📊 FinBalt Regional Gas Demand - Country Breakdown")
+st.markdown("Total gas demand broken down by **Country**, plus Storage (Inčukalns) and Export (GIPL).")
 
 st.sidebar.header("Settings")
 months_to_show = st.sidebar.slider("Select time period (months):", min_value=3, max_value=24, value=12, step=1)
@@ -167,7 +164,6 @@ else:
             'Consumption: Estonia', 
             'Consumption: Latvia', 
             'Consumption: Lithuania', 
-            'Cross-Border Transit (Sakiai/Kiemenai)',
             'Inčukalns UGS (Injection)', 
             'GIPL Export (LT -> PL)'
         ]
@@ -184,12 +180,12 @@ else:
         
         st.subheader(f"Latest Month Demand Overview ({latest_month})")
         kpi_cols = st.columns(6)
-        kpi_cols[0].metric(label="Total Tracked", value=f"{latest_total_demand:.1f} TWh")
+        kpi_cols[0].metric(label="Total Demand", value=f"{latest_total_demand:.1f} TWh")
         kpi_cols[1].metric(label="Finland", value=f"{df_display.loc[latest_month, 'Consumption: Finland']:.1f} TWh")
         kpi_cols[2].metric(label="Estonia", value=f"{df_display.loc[latest_month, 'Consumption: Estonia']:.1f} TWh")
         kpi_cols[3].metric(label="Latvia", value=f"{df_display.loc[latest_month, 'Consumption: Latvia']:.1f} TWh")
         kpi_cols[4].metric(label="Lithuania", value=f"{df_display.loc[latest_month, 'Consumption: Lithuania']:.1f} TWh")
-        kpi_cols[5].metric(label="Transit/UGS/GIPL", value=f"{(df_display.loc[latest_month, 'Cross-Border Transit (Sakiai/Kiemenai)'] + df_display.loc[latest_month, 'Inčukalns UGS (Injection)'] + df_display.loc[latest_month, 'GIPL Export (LT -> PL)']):.1f} TWh")
+        kpi_cols[5].metric(label="Inčukalns/GIPL", value=f"{(df_display.loc[latest_month, 'Inčukalns UGS (Injection)'] + df_display.loc[latest_month, 'GIPL Export (LT -> PL)']):.1f} TWh")
         
         st.markdown("---")
         
@@ -224,7 +220,7 @@ else:
         st.subheader("Demand Summary Table by Country")
         
         display_df = df_display.copy()
-        display_df['Total (TWh)'] = display_df.sum(axis=1)
+        display_df['Total Demand (TWh)'] = display_df.sum(axis=1)
         
         st.dataframe(display_df.style.format("{:.1f}"), use_container_width=True)
         
