@@ -8,14 +8,14 @@ import warnings
 warnings.filterwarnings("ignore")
 
 st.set_page_config(
-    page_title="FinBalt Regional Gas Demand - Country Breakdown",
+    page_title="FinBalt Regional Gas Demand - Country & Transit Breakdown",
     page_icon="📊",
     layout="wide"
 )
 
-# --- 1. ENTSOG DATA: Laajennettu maakohtainen haku ---
+# --- 1. ENTSOG DATA: Nopea operaattoripohjainen haku ---
 @st.cache_data(ttl=86400, show_spinner=False)
-def fetch_country_entsog_data(country_code, start_date_str, end_date_str):
+def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
     all_records = []
     
@@ -26,7 +26,6 @@ def fetch_country_entsog_data(country_code, start_date_str, end_date_str):
     while current_start < end_dt:
         current_end = min(current_start + timedelta(days=365), end_dt)
         
-        # Käytetään countryKey-parametriä, joka kattaa suoraan kyseisen maan kaikki operaattorit ja pisteet
         params = {
             'indicator': 'Physical Flow',
             'from': current_start.strftime('%Y-%m-%d'),
@@ -34,7 +33,7 @@ def fetch_country_entsog_data(country_code, start_date_str, end_date_str):
             'limit': 5000,
             'offset': 0,
             'directionKey': 'exit',
-            'countryKey': country_code
+            'operatorKey': operator_key
         }
         
         with requests.Session() as s:
@@ -61,7 +60,7 @@ def fetch_country_entsog_data(country_code, start_date_str, end_date_str):
     return all_records
 
 
-@st.cache_data(ttl=86400, show_spinner="Loading ENTSOG regional gas flows by country...")
+@st.cache_data(ttl=86400, show_spinner="Loading ENTSOG regional gas flows...")
 def fetch_full_entsog_history():
     today = datetime.today()
     first_day_current_month = today.replace(day=1)
@@ -70,16 +69,16 @@ def fetch_full_entsog_history():
     start_date_str = start_dt.strftime('%Y-%m-%d')
     end_date_str = today.strftime('%Y-%m-%d')
     
-    countries = {
-        'FI': 'Finland',
-        'EE': 'Estonia',
-        'LV': 'Latvia',
-        'LT': 'Lithuania'
+    operators = {
+        'FI-TSO-0001': 'Finland',
+        'EE-TSO-0001': 'Estonia',
+        'LV-TSO-0001': 'Latvia',
+        'LT-TSO-0001': 'Lithuania'
     }
     
     all_data = []
-    for country_code, country_name in countries.items():
-        records = fetch_country_entsog_data(country_code, start_date_str, end_date_str)
+    for op_key, country_name in operators.items():
+        records = fetch_entsog_operator_data(op_key, start_date_str, end_date_str)
         for r in records:
             r['Country'] = country_name
         all_data.extend(records)
@@ -94,19 +93,19 @@ def classify_demand_flow(row):
     country = row.get('Country', '')
     
     if direction == 'exit':
-        # 1. Varaston täyttö (Inčukalns injection Latviassa)
+        # 1. Varaston täyttö (Inčukalns injection)
         if 'incukalns' in point_label or 'inčukalns' in point_label or 'ugs-00029' in point_key:
             return 'Inčukalns UGS (Injection)'
         
-        # 2. GIPL vienti Puolaan (Santaka Liettuasta)
+        # 2. GIPL vienti Puolaan (Santaka)
         elif 'santaka' in point_label or 'itp-00556' in point_key:
             return 'GIPL Export (LT -> PL)'
             
-        # 3. Poistetaan puhtaat maantieteelliset siirtopisteet, jotka eivät ole loppukulutusta (Sakiai, Kiemenai)
-        elif any(x in point_label or x in point_key for x in ['sakiai', 'kiemenai', 'itp-00050', 'itp-00054']):
-            return None
+        # 3. Suuret siirtopisteet (Sakiai, Kiemenai, Balticconnector) omana ryhmänään tarkastelua varten
+        elif any(x in point_label or x in point_key for x in ['sakiai', 'kiemenai', 'balticconnector', 'itp-00050', 'itp-00054', 'itp-00550']):
+            return 'Cross-Border Transit / Interconnections'
             
-        # 4. Kaikki muut exit-pisteet menevät suoraan maansa mukaiseen kulutukseen
+        # 4. Muut exit-pisteet maittain
         else:
             return f'Consumption: {country}'
             
@@ -115,8 +114,8 @@ def classify_demand_flow(row):
 
 # --- 2. KÄYTTÖLIITTYMÄ (STREAMLIT UI) ---
 
-st.title("📊 FinBalt Regional Gas Demand - Country Breakdown")
-st.markdown("Total gas demand broken down by **Country**, plus Storage (Inčukalns) and Export (GIPL).")
+st.title("📊 FinBalt Regional Gas Demand - Detailed Breakdown")
+st.markdown("Fast operator fetch with explicit breakdown by **Country**, **Transit/Interconnections**, **Storage**, and **Export**.")
 
 st.sidebar.header("Settings")
 months_to_show = st.sidebar.slider("Select time period (months):", min_value=3, max_value=24, value=12, step=1)
@@ -157,6 +156,7 @@ else:
             'Consumption: Estonia', 
             'Consumption: Latvia', 
             'Consumption: Lithuania', 
+            'Cross-Border Transit / Interconnections',
             'Inčukalns UGS (Injection)', 
             'GIPL Export (LT -> PL)'
         ]
@@ -169,21 +169,20 @@ else:
         
         # --- KPI-KORTIT ---
         latest_month = df_display.index[-1]
-        latest_total_demand = df_display.loc[latest_month].sum()
+        latest_total = df_display.loc[latest_month].sum()
         
-        st.subheader(f"Latest Month Demand Overview ({latest_month})")
-        kpi_cols = st.columns(6)
-        kpi_cols[0].metric(label="Total Demand", value=f"{latest_total_demand:.1f} TWh")
+        st.subheader(f"Latest Month Overview ({latest_month})")
+        kpi_cols = st.columns(5)
+        kpi_cols[0].metric(label="Total Tracked Flows", value=f"{latest_total:.1f} TWh")
         kpi_cols[1].metric(label="Finland", value=f"{df_display.loc[latest_month, 'Consumption: Finland']:.1f} TWh")
         kpi_cols[2].metric(label="Estonia", value=f"{df_display.loc[latest_month, 'Consumption: Estonia']:.1f} TWh")
         kpi_cols[3].metric(label="Latvia", value=f"{df_display.loc[latest_month, 'Consumption: Latvia']:.1f} TWh")
         kpi_cols[4].metric(label="Lithuania", value=f"{df_display.loc[latest_month, 'Consumption: Lithuania']:.1f} TWh")
-        kpi_cols[5].metric(label="Inčukalns/GIPL", value=f"{(df_display.loc[latest_month, 'Inčukalns UGS (Injection)'] + df_display.loc[latest_month, 'GIPL Export (LT -> PL)']):.1f} TWh")
         
         st.markdown("---")
         
         # --- PLOTLY GRAAFI ---
-        st.subheader("Monthly Market Demand Breakdown by Country (TWh)")
+        st.subheader("Monthly Breakdown by Component (TWh)")
         
         plot_df = df_display.reset_index().melt(id_vars='Month', var_name='Demand Component', value_name='TWh')
         
@@ -192,7 +191,7 @@ else:
             x='Month', 
             y='TWh', 
             color='Demand Component',
-            title=f"FinBalt Market Demand by Country (Last {months_to_show} Months)",
+            title=f"FinBalt Detailed Flow Breakdown (Last {months_to_show} Months)",
             labels={'TWh': 'Energy (TWh / month)', 'Month': 'Month'},
             template='plotly_white'
         )
@@ -210,17 +209,17 @@ else:
         st.plotly_chart(fig, use_container_width=True)
         
         # --- TAULUKKO JA LATAUS ---
-        st.subheader("Demand Summary Table by Country")
+        st.subheader("Detailed Summary Table")
         
         display_df = df_display.copy()
-        display_df['Total Demand (TWh)'] = display_df.sum(axis=1)
+        display_df['Total (TWh)'] = display_df.sum(axis=1)
         
         st.dataframe(display_df.style.format("{:.1f}"), use_container_width=True)
         
         csv_data = display_df.to_csv().encode('utf-8')
         st.download_button(
-            label="Download Country Breakdown CSV 📥",
+            label="Download Detailed Breakdown CSV 📥",
             data=csv_data,
-            file_name=f"finbalt_gas_demand_by_country_{latest_month}.csv",
+            file_name=f"finbalt_detailed_breakdown_{latest_month}.csv",
             mime="text/csv"
         )
