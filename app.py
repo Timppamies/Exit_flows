@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 1. ENTSOG DATA: Haetaan kaikki tarvittavat exit-virrat (kulutus, varastojen täyttö ja vienti) ---
+# --- 1. ENTSOG DATA: Vakaa ja rajattu exit-haku ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
@@ -69,7 +69,6 @@ def fetch_full_entsog_history():
     start_date_str = start_dt.strftime('%Y-%m-%d')
     end_date_str = today.strftime('%Y-%m-%d')
     
-    # Mukana Suomen (Gasgrid), Latvian (Conexus) ja Liettuan (Amber Grid) operaattorit
     operators = ['FI-TSO-0001', 'LV-TSO-0001', 'LT-TSO-0001', 'EE-TSO-0001']
     all_data = []
     
@@ -88,10 +87,16 @@ def classify_demand_flow(row):
         # 1. Varaston täyttö (Inčukalns injection)
         if 'incukalns' in point_label or 'inčukalns' in point_label:
             return 'Inčukalns UGS (Injection)'
+        
         # 2. Vienti ulos alueelta (GIPL Puolaan)
         elif 'gipl' in point_label or 'santaka' in point_label:
             return 'GIPL Export (LT -> PL)'
-        # 3. Kaikki muut exit-virrat verkolle edustavat alueellista loppukulutusta (distribution / consumption)
+            
+        # 3. Poistetaan maiden väliset yhdysputket ja siirrot (etteivät ne nosta kulutuslukemaa keinotekoisesti)
+        elif any(interconnection in point_label for interconnection in ['karksi', 'inčukalns-latvia', 'EE-LV', 'LV-LT', 'birsb', 'korneti']):
+            return None
+            
+        # 4. Kaikki muut puhtaat verkon exit-pisteet edustavat alueellista loppukulutusta
         else:
             return 'Combined Regional Consumption'
             
@@ -101,7 +106,7 @@ def classify_demand_flow(row):
 # --- 2. KÄYTTÖLIITTYMÄ (STREAMLIT UI) ---
 
 st.title("📊 FinBalt Regional Gas Demand")
-st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Retrieved dynamically from **ENTSOG exit flows** (No Eurostat lag).")
+st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Retrieved dynamically from **ENTSOG exit flows** with cross-border transfer filtering.")
 
 st.sidebar.header("Settings")
 months_to_show = st.sidebar.slider("Select time period (months):", min_value=3, max_value=24, value=12, step=1)
@@ -130,7 +135,6 @@ else:
         df_entsog_filtered['Date_Parsed'] = pd.to_datetime(df_entsog_filtered[date_col], utc=True)
         df_entsog_filtered['Month'] = df_entsog_filtered['Date_Parsed'].dt.strftime('%Y-%m')
         
-        # Ryhmitellään päiväkohtainen maksimi tai summa per piste ja lasketaan kuukausisummat
         df_daily = df_entsog_filtered.groupby(['Month', 'Category', 'pointKey', df_entsog_filtered['Date_Parsed'].dt.date], as_index=False)['value'].max()
         
         monthly_summary = df_daily.groupby(['Month', 'Category'])['value'].sum().reset_index()
