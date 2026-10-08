@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import pandas as pd
-import eurostat
 import plotly.express as px
 from datetime import datetime, timedelta
 import warnings
@@ -14,59 +13,12 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 1. EUROSTAT DATA: Alueellinen Kulutus ---
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_eurostat_consumption():
-    try:
-        df_raw = eurostat.get_data_df("nrg_cb_gasm")
-        df_raw = df_raw.reset_index()
-        df_raw.columns = [str(c).split('\\')[-1].split(',')[-1].strip().lower() for c in df_raw.columns]
-        
-        geo_col = 'time_period' if 'time_period' in df_raw.columns else 'geo'
-        countries = {'FI': 'Finland', 'EE': 'Estonia', 'LV': 'Latvia', 'LT': 'Lithuania'}
-        
-        mask = (
-            df_raw[geo_col].isin(countries.keys()) & 
-            (df_raw['siec'] == 'G3000') & 
-            (df_raw['nrg_bal'] == 'IC_OBS')
-        )
-        df_filtered = df_raw[mask].copy()
-        
-        is_tj = 'unit' in df_filtered.columns and 'TJ_GCV' in df_filtered['unit'].values
-        if is_tj:
-            df_filtered = df_filtered[df_filtered['unit'] == 'TJ_GCV']
-        else:
-            df_filtered = df_filtered[df_filtered['unit'] == 'MIO_M3']
-            
-        date_cols = [c for c in df_filtered.columns if pd.Series(c).astype(str).str.match(r'^\d{4}-\d{2}$').any()]
-        
-        df_melted = df_filtered.melt(id_vars=[geo_col], value_vars=date_cols, var_name='Month', value_name='Volume_Raw')
-        df_melted['Volume_Num'] = pd.to_numeric(df_melted['Volume_Raw'], errors='coerce').fillna(0)
-        
-        if is_tj:
-            df_melted['Value_TWh'] = df_melted['Volume_Num'] * 0.000277778
-        else:
-            df_melted['Value_TWh'] = (df_melted['Volume_Num'] * 10.55) / 1000
-            
-        df_melted['Month'] = df_melted['Month'].astype(str)
-        df_melted = df_melted[df_melted['Month'].str.match(r'^\d{4}-\d{2}$')]
-        
-        regional_consumption = df_melted.groupby('Month')['Value_TWh'].sum().reset_index()
-        regional_consumption.rename(columns={'Value_TWh': 'Combined Regional Consumption'}, inplace=True)
-        return regional_consumption
-    except Exception as e:
-        st.error(f"Error fetching Eurostat data: {e}")
-        return pd.DataFrame(columns=['Month', 'Combined Regional Consumption'])
-
-
-# --- 2. ENTSOG DATA: Vakaa ja pilkottu Exit-haku ---
+# --- 1. ENTSOG DATA: Haetaan kaikki tarvittavat exit-virrat (kulutus, varastojen täyttö ja vienti) ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
     all_records = []
     
-    # Pilkotaan aikajakso vuositason tai pienempiin osiin (esim. 365 päivän jaksoihin), 
-    # jotta ENTSOGin rajapinta ei palauta tyhjää tai aikakatkaise massakutsua.
     start_dt = datetime.strptime(start_date_str, '%Y-%m-%d')
     end_dt = datetime.strptime(end_date_str, '%Y-%m-%d')
     
@@ -108,7 +60,7 @@ def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
     return all_records
 
 
-@st.cache_data(ttl=86400, show_spinner="Loading ENTSOG exit flows...")
+@st.cache_data(ttl=86400, show_spinner="Loading ENTSOG regional gas flows...")
 def fetch_full_entsog_history():
     today = datetime.today()
     first_day_current_month = today.replace(day=1)
@@ -117,7 +69,8 @@ def fetch_full_entsog_history():
     start_date_str = start_dt.strftime('%Y-%m-%d')
     end_date_str = today.strftime('%Y-%m-%d')
     
-    operators = ['LV-TSO-0001', 'LT-TSO-0001']
+    # Mukana Suomen (Gasgrid), Latvian (Conexus) ja Liettuan (Amber Grid) operaattorit
+    operators = ['FI-TSO-0001', 'LV-TSO-0001', 'LT-TSO-0001', 'EE-TSO-0001']
     all_data = []
     
     for op in operators:
@@ -132,18 +85,23 @@ def classify_demand_flow(row):
     direction = str(row.get('directionKey', '')).lower()
     
     if direction == 'exit':
+        # 1. Varaston täyttö (Inčukalns injection)
         if 'incukalns' in point_label or 'inčukalns' in point_label:
             return 'Inčukalns UGS (Injection)'
+        # 2. Vienti ulos alueelta (GIPL Puolaan)
         elif 'gipl' in point_label or 'santaka' in point_label:
             return 'GIPL Export (LT -> PL)'
+        # 3. Kaikki muut exit-virrat verkolle edustavat alueellista loppukulutusta (distribution / consumption)
+        else:
+            return 'Combined Regional Consumption'
             
     return None
 
 
-# --- 3. KÄYTTÖLIITTYMÄ (STREAMLIT UI) ---
+# --- 2. KÄYTTÖLIITTYMÄ (STREAMLIT UI) ---
 
 st.title("📊 FinBalt Regional Gas Demand")
-st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Combines **regional end-use consumption (Eurostat)** with **Inčukalns storage injection** and **GIPL export to Poland (ENTSOG)**.")
+st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Retrieved dynamically from **ENTSOG exit flows** (No Eurostat lag).")
 
 st.sidebar.header("Settings")
 months_to_show = st.sidebar.slider("Select time period (months):", min_value=3, max_value=24, value=12, step=1)
@@ -152,7 +110,6 @@ if st.sidebar.button("Clear Cache & Refresh 🔄"):
     st.cache_data.clear()
     st.rerun()
 
-df_consumption = fetch_eurostat_consumption()
 df_entsog_raw = fetch_full_entsog_history()
 
 if df_entsog_raw.empty:
@@ -173,22 +130,22 @@ else:
         df_entsog_filtered['Date_Parsed'] = pd.to_datetime(df_entsog_filtered[date_col], utc=True)
         df_entsog_filtered['Month'] = df_entsog_filtered['Date_Parsed'].dt.strftime('%Y-%m')
         
-        entsog_summary = df_entsog_filtered.groupby(['Month', 'Category'])['value'].sum().reset_index()
-        entsog_summary['Value_TWh'] = entsog_summary['value'] / 1e9
+        # Ryhmitellään päiväkohtainen maksimi tai summa per piste ja lasketaan kuukausisummat
+        df_daily = df_entsog_filtered.groupby(['Month', 'Category', 'pointKey', df_entsog_filtered['Date_Parsed'].dt.date], as_index=False)['value'].max()
         
-        entsog_pivot = entsog_summary.pivot(index='Month', columns='Category', values='Value_TWh').fillna(0)
+        monthly_summary = df_daily.groupby(['Month', 'Category'])['value'].sum().reset_index()
+        monthly_summary['Value_TWh'] = monthly_summary['value'] / 1e9
         
-        combined_df = pd.merge(df_consumption, entsog_pivot, on='Month', how='inner')
-        combined_df.set_index('Month', inplace=True)
+        pivot_df = monthly_summary.pivot(index='Month', columns='Category', values='Value_TWh').fillna(0)
         
         demand_cols = ['Combined Regional Consumption', 'Inčukalns UGS (Injection)', 'GIPL Export (LT -> PL)']
         for col in demand_cols:
-            if col not in combined_df.columns:
-                combined_df[col] = 0.0
+            if col not in pivot_df.columns:
+                pivot_df[col] = 0.0
                 
-        df_display = combined_df[demand_cols].tail(months_to_show)
+        df_display = pivot_df[demand_cols].tail(months_to_show)
         
-        # --- KPI-KORTIT (Yksi desimaali) ---
+        # --- KPI-KORTIT ---
         latest_month = df_display.index[-1]
         latest_total_demand = df_display.loc[latest_month].sum()
         
