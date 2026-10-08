@@ -195,4 +195,56 @@ else:
         st.subheader(f"Latest Month Demand Overview ({latest_month})")
         kpi_cols = st.columns(4)
         kpi_cols[0].metric(label="Total Market Demand", value=f"{latest_total_demand:.1f} TWh")
-        kpi_cols[1].metric(label="Regional Consumption", value=f"{df_display.loc[latest_month, 'Combined Regional Consumption']:.
+        kpi_cols[1].metric(label="Regional Consumption", value=f"{df_display.loc[latest_month, 'Combined Regional Consumption']:.1f} TWh")
+        kpi_cols[2].metric(label="Inčukalns Injection", value=f"{df_display.loc[latest_month, 'Inčukalns UGS (Injection)']:.1f} TWh")
+        kpi_cols[3].metric(label="GIPL Export", value=f"{df_display.loc[latest_month, 'GIPL Export (LT -> PL)']:.1f} TWh")
+        
+        st.markdown("---")
+        
+        # --- PLOTLY GRAAFI ---
+        st.subheader("Monthly Market Demand Breakdown (TWh)")
+        
+        plot_df = df_display.reset_index().melt(id_vars='Month', var_name='Demand Component', value_name='TWh')
+        
+        fig = px.bar(
+            plot_df, 
+            x='Month', 
+            y='TWh', 
+            color='Demand Component',
+            title=f"FinBalt Market Demand Breakdown (Last {months_to_show} Months)",
+            labels={'TWh': 'Energy (TWh / month)', 'Month': 'Month'},
+            template='plotly_white',
+            color_discrete_map={
+                'Combined Regional Consumption': '#1f77b4',
+                'Inčukalns UGS (Injection)': '#ff7f0e',
+                'GIPL Export (LT -> PL)': '#2ca02c'
+            }
+        )
+        
+        fig.update_traces(texttemplate='%{y:.1f}', textposition='none')
+        fig.update_layout(
+            barmode='stack',
+            xaxis_tickangle=-45,
+            legend_title_text='Demand Component',
+            height=520,
+            hovermode="x unified"
+        )
+        fig.update_yaxes(tickformat=".1f")
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # --- TAULUKKO JA LATAUS ---
+        st.subheader("Demand Summary Table")
+        
+        display_df = df_display.copy()
+        display_df['Total Demand (TWh)'] = display_df.sum(axis=1)
+        
+        st.dataframe(display_df.style.format("{:.1f}"), use_container_width=True)
+        
+        csv_data = display_df.to_csv().encode('utf-8')
+        st.download_button(
+            label="Download Demand Data as CSV 📥",
+            data=csv_data,
+            file_name=f"finbalt_gas_demand_{latest_month}.csv",
+            mime="text/csv"
+        )
