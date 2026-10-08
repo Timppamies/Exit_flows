@@ -59,48 +59,56 @@ def fetch_eurostat_consumption():
         return pd.DataFrame(columns=['Month', 'Combined Regional Consumption'])
 
 
-# --- 2. ENTSOG DATA: Salamannopea operaattorihaku (Vain 2 pyyntöä koko 24kk ajalta) ---
+# --- 2. ENTSOG DATA: Vakaa ja pilkottu Exit-haku ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
-    """
-    Hakee tietyn operaattorin (LV-TSO-0001 tai LT-TSO-0001) exit-virrat suoraan koko 24kk ajalta.
-    Pyyntöjä tulee vain 1 per operaattori, mikä kestää 1-2 sekuntia.
-    """
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
-    offset = 0
-    limit = 5000
     all_records = []
     
-    while True:
+    # Pilkotaan aikajakso vuositason tai pienempiin osiin (esim. 365 päivän jaksoihin), 
+    # jotta ENTSOGin rajapinta ei palauta tyhjää tai aikakatkaise massakutsua.
+    start_dt = datetime.strptime(start_date_str, '%Y-%m-%d')
+    end_dt = datetime.strptime(end_date_str, '%Y-%m-%d')
+    
+    current_start = start_dt
+    while current_start < end_dt:
+        current_end = min(current_start + timedelta(days=365), end_dt)
+        
         params = {
             'indicator': 'Physical Flow',
-            'from': start_date_str,
-            'to': end_date_str,
-            'limit': limit,
-            'offset': offset,
+            'from': current_start.strftime('%Y-%m-%d'),
+            'to': current_end.strftime('%Y-%m-%d'),
+            'limit': 5000,
+            'offset': 0,
             'directionKey': 'exit',
             'operatorKey': operator_key
         }
         
-        try:
-            response = requests.get(url, params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json().get('operationalData', [])
-                if not data:
+        with requests.Session() as s:
+            offset = 0
+            while True:
+                params['offset'] = offset
+                try:
+                    response = s.get(url, params=params, timeout=15)
+                    if response.status_code == 200:
+                        data = response.json().get('operationalData', [])
+                        if not data:
+                            break
+                        all_records.extend(data)
+                        if len(data) < 5000:
+                            break
+                        offset += 5000
+                    else:
+                        break
+                except Exception:
                     break
-                all_records.extend(data)
-                if len(data) < limit:
-                    break
-                offset += limit
-            else:
-                break
-        except Exception:
-            break
-            
+                    
+        current_start = current_end + timedelta(days=1)
+        
     return all_records
 
 
-@st.cache_data(ttl=86400, show_spinner="Fast loading 24-month ENTSOG gas demand flows...")
+@st.cache_data(ttl=86400, show_spinner="Loading ENTSOG exit flows...")
 def fetch_full_entsog_history():
     today = datetime.today()
     first_day_current_month = today.replace(day=1)
@@ -109,7 +117,6 @@ def fetch_full_entsog_history():
     start_date_str = start_dt.strftime('%Y-%m-%d')
     end_date_str = today.strftime('%Y-%m-%d')
     
-    # Suoritetaan vain kaksi täsmähakua: Conexus (Inčukalns) ja Amber Grid (GIPL)
     operators = ['LV-TSO-0001', 'LT-TSO-0001']
     all_data = []
     
@@ -135,10 +142,9 @@ def classify_demand_flow(row):
 
 # --- 3. KÄYTTÖLIITTYMÄ (STREAMLIT UI) ---
 
-st.title("📈 FinBalt Regional Gas Demand")
+st.title("📊 FinBalt Regional Gas Demand")
 st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Combines **regional end-use consumption (Eurostat)** with **Inčukalns storage injection** and **GIPL export to Poland (ENTSOG)**.")
 
-# Sivupalkki
 st.sidebar.header("Settings")
 months_to_show = st.sidebar.slider("Select time period (months):", min_value=3, max_value=24, value=12, step=1)
 
@@ -146,7 +152,6 @@ if st.sidebar.button("Clear Cache & Refresh 🔄"):
     st.cache_data.clear()
     st.rerun()
 
-# Datan haku
 df_consumption = fetch_eurostat_consumption()
 df_entsog_raw = fetch_full_entsog_history()
 
@@ -181,64 +186,13 @@ else:
             if col not in combined_df.columns:
                 combined_df[col] = 0.0
                 
-        # Slider-leikkaus muistissa olevasta datasta (0 ms)
         df_display = combined_df[demand_cols].tail(months_to_show)
         
-        # --- KPI-KORTIT ---
+        # --- KPI-KORTIT (Yksi desimaali) ---
         latest_month = df_display.index[-1]
         latest_total_demand = df_display.loc[latest_month].sum()
         
         st.subheader(f"Latest Month Demand Overview ({latest_month})")
         kpi_cols = st.columns(4)
-        kpi_cols[0].metric(label="Total Market Demand", value=f"{latest_total_demand:.3f} TWh")
-        kpi_cols[1].metric(label="Regional Consumption", value=f"{df_display.loc[latest_month, 'Combined Regional Consumption']:.3f} TWh")
-        kpi_cols[2].metric(label="Inčukalns Injection", value=f"{df_display.loc[latest_month, 'Inčukalns UGS (Injection)']:.3f} TWh")
-        kpi_cols[3].metric(label="GIPL Export", value=f"{df_display.loc[latest_month, 'GIPL Export (LT -> PL)']:.3f} TWh")
-        
-        st.markdown("---")
-        
-        # --- PLOTLY GRAAFI ---
-        st.subheader("Monthly Market Demand Breakdown (TWh)")
-        
-        plot_df = df_display.reset_index().melt(id_vars='Month', var_name='Demand Component', value_name='TWh')
-        
-        fig = px.bar(
-            plot_df, 
-            x='Month', 
-            y='TWh', 
-            color='Demand Component',
-            title=f"FinBalt Market Demand Breakdown (Last {months_to_show} Months)",
-            labels={'TWh': 'Energy (TWh / month)', 'Month': 'Month'},
-            template='plotly_white',
-            color_discrete_map={
-                'Combined Regional Consumption': '#1f77b4',
-                'Inčukalns UGS (Injection)': '#ff7f0e',
-                'GIPL Export (LT -> PL)': '#2ca02c'
-            }
-        )
-        
-        fig.update_layout(
-            barmode='stack',
-            xaxis_tickangle=-45,
-            legend_title_text='Demand Component',
-            height=520,
-            hovermode="x unified"
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # --- TAULUKKO JA LATAUS ---
-        st.subheader("Demand Summary Table")
-        
-        display_df = df_display.copy()
-        display_df['Total Demand (TWh)'] = display_df.sum(axis=1)
-        
-        st.dataframe(display_df.style.format("{:.3f}"), use_container_width=True)
-        
-        csv_data = display_df.to_csv().encode('utf-8')
-        st.download_button(
-            label="Download Demand Data as CSV 📥",
-            data=csv_data,
-            file_name=f"finbalt_gas_demand_{latest_month}.csv",
-            mime="text/csv"
-        )
+        kpi_cols[0].metric(label="Total Market Demand", value=f"{latest_total_demand:.1f} TWh")
+        kpi_cols[1].metric(label="Regional Consumption", value=f"{df_display.loc[latest_month, 'Combined Regional Consumption']:.
