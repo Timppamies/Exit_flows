@@ -13,9 +13,9 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 1. ENTSOG DATA: Maakohtainen haku korjatulla päivämäärälogiikalla ---
+# --- 1. ENTSOG DATA: Laajennettu maakohtainen haku ---
 @st.cache_data(ttl=86400, show_spinner=False)
-def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
+def fetch_country_entsog_data(country_code, start_date_str, end_date_str):
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
     all_records = []
     
@@ -26,6 +26,7 @@ def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
     while current_start < end_dt:
         current_end = min(current_start + timedelta(days=365), end_dt)
         
+        # Käytetään countryKey-parametriä, joka kattaa suoraan kyseisen maan kaikki operaattorit ja pisteet
         params = {
             'indicator': 'Physical Flow',
             'from': current_start.strftime('%Y-%m-%d'),
@@ -33,7 +34,7 @@ def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
             'limit': 5000,
             'offset': 0,
             'directionKey': 'exit',
-            'operatorKey': operator_key
+            'countryKey': country_code
         }
         
         with requests.Session() as s:
@@ -69,16 +70,16 @@ def fetch_full_entsog_history():
     start_date_str = start_dt.strftime('%Y-%m-%d')
     end_date_str = today.strftime('%Y-%m-%d')
     
-    operators = {
-        'FI-TSO-0001': 'Finland',
-        'EE-TSO-0001': 'Estonia',
-        'LV-TSO-0001': 'Latvia',
-        'LT-TSO-0001': 'Lithuania'
+    countries = {
+        'FI': 'Finland',
+        'EE': 'Estonia',
+        'LV': 'Latvia',
+        'LT': 'Lithuania'
     }
     
     all_data = []
-    for op_key, country_name in operators.items():
-        records = fetch_entsog_operator_data(op_key, start_date_str, end_date_str)
+    for country_code, country_name in countries.items():
+        records = fetch_country_entsog_data(country_code, start_date_str, end_date_str)
         for r in records:
             r['Country'] = country_name
         all_data.extend(records)
@@ -101,11 +102,11 @@ def classify_demand_flow(row):
         elif 'santaka' in point_label or 'itp-00556' in point_key:
             return 'GIPL Export (LT -> PL)'
             
-        # 3. Poistetaan puhtaat maantieteelliset siirtopisteet (Sakiai, Kiemenai)
+        # 3. Poistetaan puhtaat maantieteelliset siirtopisteet, jotka eivät ole loppukulutusta (Sakiai, Kiemenai)
         elif any(x in point_label or x in point_key for x in ['sakiai', 'kiemenai', 'itp-00050', 'itp-00054']):
             return None
             
-        # 4. Kaikki muut exit-pisteet menevät maansa mukaiseen kulutukseen
+        # 4. Kaikki muut exit-pisteet menevät suoraan maansa mukaiseen kulutukseen
         else:
             return f'Consumption: {country}'
             
