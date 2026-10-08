@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 1. ENTSOG DATA: Vakaa ja tarkasti rajattu exit-haku ---
+# --- 1. ENTSOG DATA: Vakaa ja kattava exit-haku ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
@@ -69,7 +69,6 @@ def fetch_full_entsog_history():
     start_date_str = start_dt.strftime('%Y-%m-%d')
     end_date_str = today.strftime('%Y-%m-%d')
     
-    # Varmistetaan kaikkien neljän maan TSO-avaimet mukana
     operators = ['FI-TSO-0001', 'LV-TSO-0001', 'LT-TSO-0001', 'EE-TSO-0001']
     all_data = []
     
@@ -94,11 +93,11 @@ def classify_demand_flow(row):
         elif 'santaka' in point_label or 'itp-00556' in point_key:
             return 'GIPL Export (LT -> PL)'
             
-        # 3. Poistetaan ainoastaan tunnetut isoimmat rajapisteet/siirrot (Sakiai, Kiemenai, Balticconnector)
-        elif any(x in point_label or x in point_key for x in ['sakiai', 'kiemenai', 'balticconnector', 'itp-00050', 'itp-00054', 'itp-00550']):
+        # 3. Poistetaan vain selkeät transitio-pisteet (Sakiai ja Kiemenai), säilytetään Suomen ja Baltian kansalliset exitit
+        elif any(x in point_label or x in point_key for x in ['sakiai', 'kiemenai', 'itp-00050', 'itp-00054']):
             return None
             
-        # 4. Kaikki muut exit-pisteet (mukaan lukien Suomi, Viro, Latvia, Liettua) lasketaan alueelliseen kulutukseen
+        # 4. Kaikki muut exit-pisteet (mukaan lukien Suomi ja Balticconnector / jakeluverkko) lasketaan mukaan
         else:
             return 'Combined Regional Consumption'
             
@@ -108,7 +107,7 @@ def classify_demand_flow(row):
 # --- 2. KÄYTTÖLIITTYMÄ (STREAMLIT UI) ---
 
 st.title("📊 FinBalt Regional Gas Demand")
-st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Dynamic **ENTSOG exit flows** with correct regional aggregation.")
+st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Dynamic **ENTSOG exit flows** with full regional coverage.")
 
 st.sidebar.header("Settings")
 months_to_show = st.sidebar.slider("Select time period (months):", min_value=3, max_value=24, value=12, step=1)
