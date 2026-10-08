@@ -85,19 +85,16 @@ def classify_demand_flow(row):
     direction = str(row.get('directionKey', '')).lower()
     
     if direction == 'exit':
-        # 1. Varaston täyttö (Inčukalns injection)
+        # 1. Varaston täyttö (Inčukalns injection) erotellaan omakseen
         if 'incukalns' in point_label or 'inčukalns' in point_label or 'ugs-00029' in point_key:
             return 'Inčukalns UGS (Injection)'
         
-        # 2. GIPL vienti Puolaan (Santaka)
+        # 2. GIPL vienti Puolaan (Santaka) erotellaan omakseen
         elif 'santaka' in point_label or 'itp-00556' in point_key:
             return 'GIPL Export (LT -> PL)'
             
-        # 3. Pudotetaan pois selkeät rajanylitykset ja maiden väliset siirrot (Sakiai, Kiemenai, Balticconnector)
-        elif any(x in point_label or x in point_key for x in ['sakiai', 'kiemenai', 'balticconnector', 'itp-00050', 'itp-00054', 'itp-00550']):
-            return None
-            
-        # 4. Kaikki muut exit-pisteet edustavat alueellista loppukulutusta (Suomi, Viro, Latvia, Liettua)
+        # 3. Kaikki muut operaattoreiden exit-pisteet (kotimainen loppukulutus ja jakeluverkkojen poistumat)
+        # lasketaan suoraan alueelliseen kulutukseen.
         else:
             return 'Combined Regional Consumption'
             
@@ -107,7 +104,7 @@ def classify_demand_flow(row):
 # --- 2. KÄYTTÖLIITTYMÄ (STREAMLIT UI) ---
 
 st.title("📊 FinBalt Regional Gas Demand")
-st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Dynamic **ENTSOG exit flows** with correct cross-border transfer filtering.")
+st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Dynamic **ENTSOG exit flows** with explicit storage and export separation.")
 
 st.sidebar.header("Settings")
 months_to_show = st.sidebar.slider("Select time period (months):", min_value=3, max_value=24, value=12, step=1)
