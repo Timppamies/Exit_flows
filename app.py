@@ -69,7 +69,7 @@ def fetch_full_entsog_history():
     start_date_str = start_dt.strftime('%Y-%m-%d')
     end_date_str = today.strftime('%Y-%m-%d')
     
-    # Huom: Varmistetaan että mukana on Suomi (FI-TSO-0001), Latvia, Liettua ja Viro
+    # Varmistetaan kaikkien neljän maan TSO-avaimet mukana
     operators = ['FI-TSO-0001', 'LV-TSO-0001', 'LT-TSO-0001', 'EE-TSO-0001']
     all_data = []
     
@@ -94,11 +94,11 @@ def classify_demand_flow(row):
         elif 'santaka' in point_label or 'itp-00556' in point_key:
             return 'GIPL Export (LT -> PL)'
             
-        # 3. Pudotetaan pois kansainväliset yhdysputket ja siirtopisteet (Sakiai, Kiemenai, Balticconnector)
+        # 3. Poistetaan ainoastaan tunnetut isoimmat rajapisteet/siirrot (Sakiai, Kiemenai, Balticconnector)
         elif any(x in point_label or x in point_key for x in ['sakiai', 'kiemenai', 'balticconnector', 'itp-00050', 'itp-00054', 'itp-00550']):
             return None
             
-        # 4. Kaikki muut exit-pisteet (Suomen kotimaiset poistumat, Viron ja Latvian domestic/final consumers, sekä Liettuan loppukulutus)
+        # 4. Kaikki muut exit-pisteet (mukaan lukien Suomi, Viro, Latvia, Liettua) lasketaan alueelliseen kulutukseen
         else:
             return 'Combined Regional Consumption'
             
@@ -108,7 +108,7 @@ def classify_demand_flow(row):
 # --- 2. KÄYTTÖLIITTYMÄ (STREAMLIT UI) ---
 
 st.title("📊 FinBalt Regional Gas Demand")
-st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Dynamic **ENTSOG exit flows** with precise consumption filtering.")
+st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Dynamic **ENTSOG exit flows** with correct regional aggregation.")
 
 st.sidebar.header("Settings")
 months_to_show = st.sidebar.slider("Select time period (months):", min_value=3, max_value=24, value=12, step=1)
