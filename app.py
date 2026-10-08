@@ -50,7 +50,6 @@ COUNTRY_COLS = [
 OTHER_COLS = [
     "Inčukalns UGS (Injection)",
     "GIPL Export (LT → PL)",
-    "Kaliningrad transit (LT → RU)",
 ]
 
 
@@ -162,7 +161,6 @@ def build_monthly(raw):
                                      - g["LT_gipl"] - g["LT_kal"])
     out["Inčukalns UGS (Injection)"] = g["LV_inj"]
     out["GIPL Export (LT → PL)"] = g["LT_gipl"]
-    out["Kaliningrad transit (LT → RU)"] = g["LT_kal"]
     return out.sort_index()
 
 
@@ -214,12 +212,12 @@ label = f"{latest} (partial, data through {last_day})" if partial else latest
 st.subheader(f"Latest month overview: {label}")
 row = df_display.loc[latest]
 k = st.columns(6)
-k[0].metric("Total consumption (4 countries)", f"{row[COUNTRY_COLS].sum():.2f} TWh")
-k[1].metric("Finland", f"{row['Consumption: Finland']:.2f} TWh")
-k[2].metric("Estonia", f"{row['Consumption: Estonia']:.2f} TWh")
-k[3].metric("Latvia", f"{row['Consumption: Latvia']:.2f} TWh")
-k[4].metric("Lithuania", f"{row['Consumption: Lithuania']:.2f} TWh")
-k[5].metric("Storage + exports", f"{row[OTHER_COLS].sum():.2f} TWh")
+k[0].metric("Total consumption (4 countries)", f"{row[COUNTRY_COLS].sum():.1f} TWh")
+k[1].metric("Finland", f"{row['Consumption: Finland']:.1f} TWh")
+k[2].metric("Estonia", f"{row['Consumption: Estonia']:.1f} TWh")
+k[3].metric("Latvia", f"{row['Consumption: Latvia']:.1f} TWh")
+k[4].metric("Lithuania", f"{row['Consumption: Lithuania']:.1f} TWh")
+k[5].metric("Storage + exports", f"{row[OTHER_COLS].sum():.1f} TWh")
 
 st.markdown("---")
 
@@ -236,7 +234,7 @@ fig = px.bar(
 )
 fig.update_layout(barmode="stack", xaxis_tickangle=-45, height=520,
                   legend_title_text="Component", hovermode="x unified")
-fig.update_yaxes(tickformat=".2f")
+fig.update_yaxes(tickformat=".1f")
 st.plotly_chart(fig, use_container_width=True)
 
 if (df_display["Consumption: Lithuania"] < 0).any() or \
@@ -251,11 +249,11 @@ st.subheader("Summary table (TWh)")
 table = df_display.copy()
 table["Total consumption (4 countries)"] = table[COUNTRY_COLS].sum(axis=1)
 table["Total incl. storage & exports"] = table[COUNTRY_COLS + OTHER_COLS].sum(axis=1)
-st.dataframe(table.style.format("{:.2f}"), use_container_width=True)
+st.dataframe(table.style.format("{:.1f}"), use_container_width=True)
 
 st.download_button(
     "Download CSV 📥",
-    table.round(4).to_csv().encode("utf-8"),
+    table.round(1).to_csv().encode("utf-8"),
     file_name=f"finbalt_gas_demand_{latest}.csv",
     mime="text/csv",
 )
@@ -273,7 +271,7 @@ with st.expander("Method and caveats"):
   Imatra + Balticconnector (EE→FI) + Hamina LNG + Inkoo LNG − Balticconnector (FI→EE).
 - **Lithuania:** no consumption point is reported, so it is a balance:
   Klaipėda LNG + Kiemenai (LV→LT) + Santaka (PL→LT) + Kotlovka − Kiemenai (LT→LV)
-  − Santaka (LT→PL) − Sakiai (LT→RU). Sakiai is shown separately as Kaliningrad transit.
+  − Santaka (LT→PL) − Sakiai (LT→RU). Sakiai is Kaliningrad transit: it is subtracted from the balance but not shown.
 - **Inčukalns:** storage *injection* only (exit direction). Withdrawal is not demand.
 - Balances ignore linepack changes, losses and domestic biogas, so individual months
   are approximate.
