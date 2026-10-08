@@ -13,14 +13,18 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 1. ENTSOG DATA: Haku operaattoreittain ---
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
+# --- 1. ENTSOG DATA: Haetaan kaikki alueen exit-virrat kerralla ilman operaattorirajoitteita ---
+@st.cache_data(ttl=86400, show_spinner="Loading ENTSOG regional gas flows...")
+def fetch_full_entsog_history():
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
     all_records = []
     
-    start_dt = datetime.strptime(start_date_str, '%Y-%m-%d')
-    end_dt = datetime.strptime(end_date_str, '%Y-%m-%d')
+    today = datetime.today()
+    first_day_current_month = today.replace(day=1)
+    start_dt = (first_day_current_month - timedelta(days=24 * 31)).replace(day=1)
+    
+    start_date_str = start_dt.strftime('%Y-%m-%d')
+    end_date_str = today.strftime('%Y-%m-%d')
     
     current_start = start_dt
     while current_start < end_dt:
@@ -33,15 +37,21 @@ def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
             'limit': 5000,
             'offset': 0,
             'directionKey': 'exit',
-            'operatorKey': operator_key
+            # Rajataan maantieteellisesti FinBalt-alueen operaattoreihin tai haetaan suoraan alueen pisteet
+            'areaLabel': 'Baltic' # tai haetaan ilman areajakoa, jos halutaan varmistaa kaikki
         }
+        
+        # Koska haluamme varmasti Suomen (Gasgrid), Viron (Elering), Latvian (Conexus) ja Liettuan (Amber Grid), 
+        # haetaan suoraan ilman maarajauksia tai käytetään tunnettuja operaattoreita. Tehdään haku ilman operaattorifiltteriä 
+        # ja poimitaan oikeat maamerkinnät.
+        del params['areaLabel']
         
         with requests.Session() as s:
             offset = 0
             while True:
                 params['offset'] = offset
                 try:
-                    response = s.get(url, params=params, timeout=15)
+                    response = s.get(url, params=params, timeout=20)
                     if response.status_code == 200:
                         data = response.json().get('operationalData', [])
                         if not data:
@@ -57,58 +67,40 @@ def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
                     
         current_start = current_end + timedelta(days=1)
         
-    return all_records
-
-
-@st.cache_data(ttl=86400, show_spinner="Loading ENTSOG regional gas flows by country...")
-def fetch_full_entsog_history():
-    today = datetime.today()
-    first_day_current_month = today.replace(day=1)
-    start_dt = (first_day_current_month - timedelta(days=24 * 31)).replace(day=1)
-    
-    start_date_str = start_dt.strftime('%Y-%m-%d')
-    end_date_str = today.strftime('%Y-%m-%d')
-    
-    operators = {
-        'FI-TSO-0001': 'Finland',
-        'EE-TSO-0001': 'Estonia',
-        'LV-TSO-0001': 'Latvia',
-        'LT-TSO-0001': 'Lithuania'
-    }
-    
-    all_data = []
-    for op_key, country_name in operators.items():
-        records = fetch_entsog_operator_data(op_key, start_date_str, end_date_str)
-        for r in records:
-            r['Country'] = country_name
-        all_data.extend(records)
-        
-    return pd.DataFrame(all_data)
+    return pd.DataFrame(all_records)
 
 
 def classify_demand_flow(row):
     point_key = str(row.get('pointKey', '')).lower()
     point_label = str(row.get('pointLabel', '')).lower()
+    operator_key = str(row.get('operatorKey', '')).upper()
     direction = str(row.get('directionKey', '')).lower()
-    country = row.get('Country', '')
     
-    if direction == 'exit':
-        # 1. Varaston täyttö (Inčukalns injection Latviassa)
-        if 'incukalns' in point_label or 'inčukalns' in point_label or 'ugs-00029' in point_key:
-            return 'Inčukalns UGS (Injection)'
+    if direction != 'exit':
+        return None
         
-        # 2. GIPL vienti Puolaan (Santaka Liettuasta)
-        elif 'santaka' in point_label or 'itp-00556' in point_key:
-            return 'GIPL Export (LT -> PL)'
-            
-        # 3. Poistetaan puhtaat maatylittävät siirtopisteet (Sakiai ja Kiemenai), jotka eivät ole loppukulutusta
-        elif any(x in point_label or x in point_key for x in ['sakiai', 'kiemenai', 'itp-00050', 'itp-00054']):
-            return None
-            
-        # 4. Kaikki muut exit-pisteet luokitellaan suoraan maansa mukaiseen kulutukseen
-        else:
-            return f'Consumption: {country}'
-            
+    # 1. Varaston täyttö (Inčukalns injection)
+    if 'incukalns' in point_label or 'inčukalns' in point_label or 'ugs-00029' in point_key:
+        return 'Inčukalns UGS (Injection)'
+    
+    # 2. GIPL vienti Puolaan (Santaka)
+    elif 'santaka' in point_label or 'itp-00556' in point_key:
+        return 'GIPL Export (LT -> PL)'
+        
+    # 3. Poistetaan selkeät suuret siirtopisteet, jotka eivät ole loppukulutusta (Sakiai, Kiemenai)
+    elif any(x in point_label or x in point_key for x in ['sakiai', 'kiemenai', 'itp-00050', 'itp-00054']):
+        return None
+        
+    # 4. Tunnistetaan maa operaattoriavaimen tai pisteen perusteella
+    if 'FI' in operator_key or 'finland' in point_label or 'gasgrid' in str(row.get('operatorLabel', '')).lower() or 'inkoo' in point_label or 'imatra' in point_label:
+        return 'Consumption: Finland'
+    elif 'EE' in operator_key or 'estonia' in point_label or 'elering' in str(row.get('operatorLabel', '')).lower():
+        return 'Consumption: Estonia'
+    elif 'LV' in operator_key or 'latvia' in point_label or 'conexus' in str(row.get('operatorLabel', '')).lower():
+        return 'Consumption: Latvia'
+    elif 'LT' in operator_key or 'lithuania' in point_label or 'amber' in str(row.get('operatorLabel', '')).lower() or 'jaunaičiai' in point_label:
+        return 'Consumption: Lithuania'
+        
     return None
 
 
@@ -217,4 +209,9 @@ else:
         st.dataframe(display_df.style.format("{:.1f}"), use_container_width=True)
         
         csv_data = display_df.to_csv().encode('utf-8')
-        
+        st.download_button(
+            label="Download Country Breakdown CSV 📥",
+            data=csv_data,
+            file_name=f"finbalt_gas_demand_by_country_{latest_month}.csv",
+            mime="text/csv"
+        )
