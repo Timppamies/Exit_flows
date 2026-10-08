@@ -8,12 +8,12 @@ import warnings
 warnings.filterwarnings("ignore")
 
 st.set_page_config(
-    page_title="FinBalt Regional Gas Demand",
+    page_title="FinBalt Regional Gas Demand - Debug",
     page_icon="📊",
     layout="wide"
 )
 
-# --- 1. ENTSOG DATA: Vakaa ja rajattu exit-haku ---
+# --- 1. ENTSOG DATA: Exit-haku ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
@@ -79,133 +79,36 @@ def fetch_full_entsog_history():
     return pd.DataFrame(all_data)
 
 
-def classify_demand_flow(row):
-    point_label = str(row.get('pointLabel', '')).lower()
-    direction = str(row.get('directionKey', '')).lower()
-    
-    if direction == 'exit':
-        # 1. Varaston täyttö (Inčukalns injection)
-        if 'incukalns' in point_label or 'inčukalns' in point_label:
-            return 'Inčukalns UGS (Injection)'
-        
-        # 2. Vienti ulos alueelta (GIPL Puolaan)
-        elif 'gipl' in point_label or 'santaka' in point_label:
-            return 'GIPL Export (LT -> PL)'
-            
-        # 3. Poistetaan maiden väliset yhdysputket ja siirrot (etteivät ne nosta kulutuslukemaa keinotekoisesti)
-        elif any(interconnection in point_label for interconnection in ['karksi', 'inčukalns-latvia', 'EE-LV', 'LV-LT', 'birsb', 'korneti']):
-            return None
-            
-        # 4. Kaikki muut puhtaat verkon exit-pisteet edustavat alueellista loppukulutusta
-        else:
-            return 'Combined Regional Consumption'
-            
-    return None
+# --- 2. KÄYTTÖLIITTYMÄ JA DEBUG-NÄKYMÄ ---
 
+st.title("📊 FinBalt Regional Gas Demand - Exit Points Debug")
+st.markdown("Tämä näkymä näyttää kaikki ENTSOGin kautta tulevat `exit`-pisteet, jotta voimme paikantaa haamukulutuksen aiheuttajan.")
 
-# --- 2. KÄYTTÖLIITTYMÄ (STREAMLIT UI) ---
-
-st.title("📊 FinBalt Regional Gas Demand")
-st.markdown("Total gas demand across Finland, Estonia, Latvia, and Lithuania. Retrieved dynamically from **ENTSOG exit flows** with cross-border transfer filtering.")
-
-st.sidebar.header("Settings")
-months_to_show = st.sidebar.slider("Select time period (months):", min_value=3, max_value=24, value=12, step=1)
-
-if st.sidebar.button("Clear Cache & Refresh 🔄"):
+if st.button("Clear Cache & Refresh 🔄"):
     st.cache_data.clear()
     st.rerun()
 
 df_entsog_raw = fetch_full_entsog_history()
 
 if df_entsog_raw.empty:
-    st.warning("No flow data retrieved from ENTSOG. Please try clicking 'Clear Cache & Refresh'.")
+    st.warning("Ei dataa ENTSOGista.")
 else:
-    df_entsog_raw['Category'] = df_entsog_raw.apply(classify_demand_flow, axis=1)
-    df_entsog_filtered = df_entsog_raw.dropna(subset=['Category']).copy()
+    # Siivotaan ja muotoillaan tiedot tarkastelua varten
+    date_candidates = ['periodFrom', 'gasDayStart', 'periodStart', 'gasDayStartedOn']
+    date_col = next((c for c in date_candidates if c in df_entsog_raw.columns), None)
     
-    if df_entsog_filtered.empty:
-        st.warning("No matching demand exit flows found.")
-    else:
-        date_candidates = ['periodFrom', 'gasDayStart', 'periodStart', 'gasDayStartedOn']
-        date_col = next((c for c in date_candidates if c in df_entsog_filtered.columns), None)
-        if not date_col:
-            date_col = next((c for c in df_entsog_filtered.columns if 'period' in c.lower() or 'date' in c.lower()), None)
+    df_entsog_raw['value'] = pd.to_numeric(df_entsog_raw['value'], errors='coerce').fillna(0)
+    df_entsog_raw['Date_Parsed'] = pd.to_datetime(df_entsog_raw[date_col], utc=True)
+    df_entsog_raw['Month'] = df_entsog_raw['Date_Parsed'].dt.strftime('%Y-%m')
 
-        df_entsog_filtered['value'] = pd.to_numeric(df_entsog_filtered['value'], errors='coerce').fillna(0)
-        df_entsog_filtered['Date_Parsed'] = pd.to_datetime(df_entsog_filtered[date_col], utc=True)
-        df_entsog_filtered['Month'] = df_entsog_filtered['Date_Parsed'].dt.strftime('%Y-%m')
+    st.subheader("Kaikki löydetyt Exit-pisteet (Point Labels & Keys)")
+    
+    # Listataan uniikit pisteet, operaattorit ja niiden yhteenlasketut volyymit
+    if 'pointLabel' in df_entsog_raw.columns and 'operatorKey' in df_entsog_raw.columns:
+        summary_points = df_entsog_raw.groupby(['operatorKey', 'pointKey', 'pointLabel', 'directionKey'], as_index=False)['value'].sum()
+        summary_points['Total_TWh'] = summary_points['value'] / 1e9
+        summary_points = summary_points.sort_values(by='Total_TWh', ascending=False)
         
-        df_daily = df_entsog_filtered.groupby(['Month', 'Category', 'pointKey', df_entsog_filtered['Date_Parsed'].dt.date], as_index=False)['value'].max()
-        
-        monthly_summary = df_daily.groupby(['Month', 'Category'])['value'].sum().reset_index()
-        monthly_summary['Value_TWh'] = monthly_summary['value'] / 1e9
-        
-        pivot_df = monthly_summary.pivot(index='Month', columns='Category', values='Value_TWh').fillna(0)
-        
-        demand_cols = ['Combined Regional Consumption', 'Inčukalns UGS (Injection)', 'GIPL Export (LT -> PL)']
-        for col in demand_cols:
-            if col not in pivot_df.columns:
-                pivot_df[col] = 0.0
-                
-        df_display = pivot_df[demand_cols].tail(months_to_show)
-        
-        # --- KPI-KORTIT ---
-        latest_month = df_display.index[-1]
-        latest_total_demand = df_display.loc[latest_month].sum()
-        
-        st.subheader(f"Latest Month Demand Overview ({latest_month})")
-        kpi_cols = st.columns(4)
-        kpi_cols[0].metric(label="Total Market Demand", value=f"{latest_total_demand:.1f} TWh")
-        kpi_cols[1].metric(label="Regional Consumption", value=f"{df_display.loc[latest_month, 'Combined Regional Consumption']:.1f} TWh")
-        kpi_cols[2].metric(label="Inčukalns Injection", value=f"{df_display.loc[latest_month, 'Inčukalns UGS (Injection)']:.1f} TWh")
-        kpi_cols[3].metric(label="GIPL Export", value=f"{df_display.loc[latest_month, 'GIPL Export (LT -> PL)']:.1f} TWh")
-        
-        st.markdown("---")
-        
-        # --- PLOTLY GRAAFI ---
-        st.subheader("Monthly Market Demand Breakdown (TWh)")
-        
-        plot_df = df_display.reset_index().melt(id_vars='Month', var_name='Demand Component', value_name='TWh')
-        
-        fig = px.bar(
-            plot_df, 
-            x='Month', 
-            y='TWh', 
-            color='Demand Component',
-            title=f"FinBalt Market Demand Breakdown (Last {months_to_show} Months)",
-            labels={'TWh': 'Energy (TWh / month)', 'Month': 'Month'},
-            template='plotly_white',
-            color_discrete_map={
-                'Combined Regional Consumption': '#1f77b4',
-                'Inčukalns UGS (Injection)': '#ff7f0e',
-                'GIPL Export (LT -> PL)': '#2ca02c'
-            }
-        )
-        
-        fig.update_traces(texttemplate='%{y:.1f}', textposition='none')
-        fig.update_layout(
-            barmode='stack',
-            xaxis_tickangle=-45,
-            legend_title_text='Demand Component',
-            height=520,
-            hovermode="x unified"
-        )
-        fig.update_yaxes(tickformat=".1f")
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # --- TAULUKKO JA LATAUS ---
-        st.subheader("Demand Summary Table")
-        
-        display_df = df_display.copy()
-        display_df['Total Demand (TWh)'] = display_df.sum(axis=1)
-        
-        st.dataframe(display_df.style.format("{:.1f}"), use_container_width=True)
-        
-        csv_data = display_df.to_csv().encode('utf-8')
-        st.download_button(
-            label="Download Demand Data as CSV 📥",
-            data=csv_data,
-            file_name=f"finbalt_gas_demand_{latest_month}.csv",
-            mime="text/csv"
-        )
+        st.dataframe(summary_points[['operatorKey', 'pointKey', 'pointLabel', 'directionKey', 'Total_TWh']], use_container_width=True)
+    else:
+        st.write(df_entsog_raw.head(20))
