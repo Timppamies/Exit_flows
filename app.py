@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 1. ENTSOG DATA: Vakaa haku ---
+# --- 1. ENTSOG DATA: Haku operaattoreittain ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_entsog_operator_data(operator_key, start_date_str, end_date_str):
     url = "https://transparency.entsog.eu/api/v1/operationalData.json"
@@ -101,11 +101,11 @@ def classify_demand_flow(row):
         elif 'santaka' in point_label or 'itp-00556' in point_key:
             return 'GIPL Export (LT -> PL)'
             
-        # 3. Poistetaan puhtaat siirtopisteet (Sakiai ja Kiemenai)
+        # 3. Poistetaan puhtaat maatylittävät siirtopisteet (Sakiai ja Kiemenai), jotka eivät ole loppukulutusta
         elif any(x in point_label or x in point_key for x in ['sakiai', 'kiemenai', 'itp-00050', 'itp-00054']):
             return None
             
-        # 4. Muut exit-pisteet ryhmitellään maittain
+        # 4. Kaikki muut exit-pisteet luokitellaan suoraan maansa mukaiseen kulutukseen
         else:
             return f'Consumption: {country}'
             
@@ -217,9 +217,4 @@ else:
         st.dataframe(display_df.style.format("{:.1f}"), use_container_width=True)
         
         csv_data = display_df.to_csv().encode('utf-8')
-        st.download_button(
-            label="Download Country Breakdown CSV 📥",
-            data=csv_data,
-            file_name=f"finbalt_gas_demand_by_country_{latest_month}.csv",
-            mime="text/csv"
-        )
+        
