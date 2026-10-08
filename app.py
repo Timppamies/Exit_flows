@@ -24,7 +24,6 @@ SERIES = [
     # Inčukalns storage injection
     ("LV_inj", "LV-TSO-0001", "UGS-00029", "exit", "Inčukalns injection"),
     # Finland: balance (no consumption point reported)
-    ("FI_in", "FI-TSO-0003", "ITP-00024", "entry", "Imatra (RU→FI)"),
     ("FI_in", "FI-TSO-0003", "ITP-00550", "entry", "Balticconnector (EE→FI)"),
     ("FI_in", "FI-TSO-0003", "LNG-00011", "entry", "Hamina LNG"),
     ("FI_in", "FI-TSO-0003", "LNG-00072", "entry", "Inkoo LNG"),
@@ -268,7 +267,8 @@ with st.expander("Method and caveats"):
 - **Estonia, Latvia:** ENTSOG aggregated *Final consumers* exit points
   (`FNC-00037`, `FNC-00205`). Read directly, no calculation.
 - **Finland:** no consumption point is reported, so it is a balance:
-  Imatra + Balticconnector (EE→FI) + Hamina LNG + Inkoo LNG − Balticconnector (FI→EE).
+  Balticconnector (EE→FI) + Hamina LNG + Inkoo LNG − Balticconnector (FI→EE).
+  Imatra (Russia) is excluded because the border is closed.
 - **Lithuania:** no consumption point is reported, so it is a balance:
   Klaipėda LNG + Kiemenai (LV→LT) + Santaka (PL→LT) + Kotlovka − Kiemenai (LT→LV)
   − Santaka (LT→PL) − Sakiai (LT→RU). Sakiai is Kaliningrad transit: it is subtracted from the balance but not shown.
