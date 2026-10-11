@@ -16,6 +16,13 @@ st.set_page_config(page_title="FinBalt Gas Demand", page_icon="📊", layout="wi
 URL = "https://transparency.entsog.eu/api/v1/operationalData.json"
 CHUNK_DAYS = 180  # one request covers at most this many days
 
+# Cache: closed history years are kept for a month, the current year for 6 hours.
+HISTORY_TTL = 30 * 24 * 3600
+CURRENT_TTL = 6 * 3600
+# A year counts as "history" only this many days after it has ended, so that
+# late-published or revised December data is not locked in for a month.
+YEAR_GRACE_DAYS = 60
+
 # (group, operatorKey, pointKey, direction, label)
 SERIES = [
     # Direct consumption points (aggregated "Final consumers")
@@ -78,8 +85,7 @@ def _chunks(start, end):
         cur = stop + timedelta(days=1)
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def fetch_series(operator, point, direction, start_str, end_str):
+def _fetch_series(operator, point, direction, start_str, end_str):
     """Daily Physical Flow (kWh/d) for one operator/point/direction.
 
     Raises if any chunk fails, so partial results are never cached.
@@ -120,21 +126,50 @@ def fetch_series(operator, point, direction, start_str, end_str):
     return {"days": days, "dupes": dupes}
 
 
-def load_all(start_str, end_str):
+@st.cache_data(ttl=HISTORY_TTL, show_spinner=False)
+def fetch_series_history(operator, point, direction, start_str, end_str):
+    """Closed history years: cached for a month."""
+    return _fetch_series(operator, point, direction, start_str, end_str)
+
+
+@st.cache_data(ttl=CURRENT_TTL, show_spinner=False)
+def fetch_series_current(operator, point, direction, start_str, end_str):
+    """Current year: cached for 6 hours."""
+    return _fetch_series(operator, point, direction, start_str, end_str)
+
+
+def history_split(start, today):
+    """First day of the 'current' period; everything before it is history."""
+    return max(start, date((today - timedelta(days=YEAR_GRACE_DAYS)).year, 1, 1))
+
+
+def load_all(start, split, end):
     frames, failed, dupes = [], [], 0
+    # History is fetched from 1 January of the window's first year, so its cache
+    # key stays the same when the rolling 24-month window moves forward a month.
+    hist_start = date(start.year, 1, 1)
+    hist_end = split - timedelta(days=1)
     bar = st.progress(0.0, text="Loading ENTSOG data...")
     for i, (grp, op, pt, d, label) in enumerate(SERIES):
         bar.progress(i / len(SERIES), text=f"Loading {label} ({i + 1}/{len(SERIES)})")
         try:
-            res = fetch_series(op, pt, d, start_str, end_str)
+            days, n = {}, 0
+            if split > start:
+                h = fetch_series_history(op, pt, d, hist_start.isoformat(),
+                                         hist_end.isoformat())
+                days.update(h["days"])
+                n += h["dupes"]
+            c = fetch_series_current(op, pt, d, split.isoformat(), end.isoformat())
+            days.update(c["days"])
+            n += c["dupes"]
         except Exception as e:
             failed.append(f"{label} [{op} {pt} {d}]: {e}")
             continue
-        dupes += res["dupes"]
-        if res["days"]:
+        dupes += n
+        if days:
             frames.append(pd.DataFrame({
-                "day": list(res["days"].keys()),
-                "TWh": [v / 1e9 for v in res["days"].values()],  # kWh/d -> TWh
+                "day": list(days.keys()),
+                "TWh": [v / 1e9 for v in days.values()],  # kWh/d -> TWh
                 "group": grp,
                 "series": f"{grp}: {label}",
             }))
@@ -173,17 +208,22 @@ st.markdown(
 
 st.sidebar.header("Settings")
 months_to_show = st.sidebar.slider("Time period (months):", 3, 24, 12, 1)
-if st.sidebar.button("Clear cache & refresh 🔄"):
+if st.sidebar.button("Refresh current year 🔄"):
+    fetch_series_current.clear()
+    st.rerun()
+if st.sidebar.button("Clear all cache (incl. history)"):
     st.cache_data.clear()
     st.rerun()
 st.sidebar.caption(
-    "Data is cached for 6 hours. Series that fail to load are retried on the "
-    "next refresh; successful ones stay cached."
+    "History years are cached for 30 days, the current year for 6 hours. "
+    "Series that fail to load are retried on the next refresh; successful "
+    "ones stay cached."
 )
 
 today = date.today()
 start_date = (pd.Timestamp(today.replace(day=1)) - pd.DateOffset(months=24)).date()
-raw, failed, dupes = load_all(start_date.isoformat(), today.isoformat())
+split = history_split(start_date, today)
+raw, failed, dupes = load_all(start_date, split, today)
 
 if failed:
     st.warning(
@@ -279,11 +319,15 @@ with st.expander("Method and caveats"):
   so they can only be cross-checked together (the sum of the two consumption points
   matched the combined balance closely when checked).
 - The latest month is incomplete until the month ends.
+- History years are cached for 30 days, so a revision ENTSOG makes to old data
+  shows up only after that (or after "Clear all cache").
         """
     )
 
 with st.expander("Data quality"):
     st.write(f"Duplicate daily records dropped: {dupes}")
+    st.write(f"Cached as history (30 days): before {split}. "
+             f"Current (6 hours): {split} onwards.")
     tail_months = sorted(raw["day"].str[:7].unique())[-months_to_show:]
     sub = raw[raw["day"].str[:7].isin(tail_months)].copy()
     sub["Month"] = sub["day"].str[:7]
