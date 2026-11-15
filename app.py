@@ -1,49 +1,21 @@
 """FinBalt Regional Gas Demand: Finland, Estonia, Latvia, Lithuania (ENTSOG).
 
-Run with:  streamlit run finbalt_gas_demand.py
+Data is fetched every evening by GitHub Actions into data/entsog_daily.csv
+(fetch_data.py), so the app normally reads it from the repository and calls
+the ENTSOG API only if that file is missing or out of date.
+Run with:  streamlit run app.py
 """
-import time
-from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import date
 
 import pandas as pd
 import plotly.express as px
-import requests
 import streamlit as st
+
+from entsog import SERIES
+from store import fetch_live, load_flows, source_text
 
 st.set_page_config(page_title="FinBalt Gas Demand", page_icon="📊", layout="wide")
 
-URL = "https://transparency.entsog.eu/api/v1/operationalData.json"
-CHUNK_DAYS = 180  # one request covers at most this many days
-
-# Cache: closed history years are kept for a month, the current year for 6 hours.
-HISTORY_TTL = 30 * 24 * 3600
-CURRENT_TTL = 6 * 3600
-# A year counts as "history" only this many days after it has ended, so that
-# late-published or revised December data is not locked in for a month.
-YEAR_GRACE_DAYS = 60
-
-# (group, operatorKey, pointKey, direction, label)
-SERIES = [
-    # Direct consumption points (aggregated "Final consumers")
-    ("EE_cons", "EE-TSO-0001", "FNC-00037", "exit", "Estonia final consumers"),
-    ("LV_cons", "LV-TSO-0001", "FNC-00205", "exit", "Latvia domestic consumption"),
-    # Inčukalns storage injection
-    ("LV_inj", "LV-TSO-0001", "UGS-00029", "exit", "Inčukalns injection"),
-    # Finland: balance (no consumption point reported)
-    ("FI_in", "FI-TSO-0003", "ITP-00550", "entry", "Balticconnector (EE→FI)"),
-    ("FI_in", "FI-TSO-0003", "LNG-00011", "entry", "Hamina LNG"),
-    ("FI_in", "FI-TSO-0003", "LNG-00072", "entry", "Inkoo LNG"),
-    ("FI_out", "FI-TSO-0003", "ITP-00550", "exit", "Balticconnector (FI→EE)"),
-    # Lithuania: balance (no consumption point reported)
-    ("LT_in", "LT-TSO-0001", "LNG-00030", "entry", "Klaipėda LNG"),
-    ("LT_in", "LT-TSO-0001", "ITP-00054", "entry", "Kiemenai (LV→LT)"),
-    ("LT_in", "LT-TSO-0001", "ITP-00556", "entry", "Santaka (PL→LT)"),
-    ("LT_in", "LT-TSO-0001", "ITP-00085", "entry", "Kotlovka (BY→LT)"),
-    ("LT_out_lv", "LT-TSO-0001", "ITP-00054", "exit", "Kiemenai (LT→LV)"),
-    ("LT_gipl", "LT-TSO-0001", "ITP-00556", "exit", "Santaka (LT→PL)"),
-    ("LT_kal", "LT-TSO-0001", "ITP-00050", "exit", "Sakiai (LT→RU)"),
-]
 GROUPS = ["EE_cons", "LV_cons", "LV_inj", "FI_in", "FI_out",
           "LT_in", "LT_out_lv", "LT_gipl", "LT_kal"]
 
@@ -59,113 +31,16 @@ OTHER_COLS = [
 ]
 
 
-# ---------------------------------------------------------------- data fetch
-def _request(params):
-    """GET with retries. Raises RuntimeError if all attempts fail."""
-    err = "unknown error"
-    for attempt in range(4):
-        try:
-            r = requests.get(URL, params=params, timeout=120)
-            if r.status_code == 200:
-                return r.json().get("operationalData", [])
-            err = f"HTTP {r.status_code}"
-            if 400 <= r.status_code < 500 and r.status_code != 429:
-                break  # retrying will not help
-        except (requests.RequestException, ValueError) as e:
-            err = type(e).__name__
-        time.sleep(4 * (attempt + 1))
-    raise RuntimeError(err)
-
-
-def _chunks(start, end):
-    cur = start
-    while cur <= end:
-        stop = min(cur + timedelta(days=CHUNK_DAYS - 1), end)
-        yield cur, stop
-        cur = stop + timedelta(days=1)
-
-
-def _fetch_series(operator, point, direction, start_str, end_str):
-    """Daily Physical Flow (kWh/d) for one operator/point/direction.
-
-    Raises if any chunk fails, so partial results are never cached.
-    """
-    start = date.fromisoformat(start_str)
-    end = date.fromisoformat(end_str)
-
-    def one(rng):
-        a, b = rng
-        return _request({
-            "indicator": "Physical Flow",
-            "periodType": "day",
-            "from": a.isoformat(),
-            "to": b.isoformat(),
-            "pointKey": point,
-            "directionKey": direction,
-            "limit": -1,
-        })
-
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        parts = list(ex.map(one, list(_chunks(start, end))))
-
-    days, dupes = {}, 0
-    for recs in parts:
-        for x in recs:
-            if (x.get("operatorKey") != operator
-                    or x.get("pointKey") != point
-                    or x.get("directionKey") != direction):
-                continue
-            day = str(x.get("periodFrom", ""))[:10]
-            try:
-                value = float(x.get("value") or 0)
-            except (TypeError, ValueError):
-                value = 0.0
-            if day in days:
-                dupes += 1
-            days[day] = value
-    return {"days": days, "dupes": dupes}
-
-
-@st.cache_data(ttl=HISTORY_TTL, show_spinner=False)
-def fetch_series_history(operator, point, direction, start_str, end_str):
-    """Closed history years: cached for a month."""
-    return _fetch_series(operator, point, direction, start_str, end_str)
-
-
-@st.cache_data(ttl=CURRENT_TTL, show_spinner=False)
-def fetch_series_current(operator, point, direction, start_str, end_str):
-    """Current year: cached for 6 hours."""
-    return _fetch_series(operator, point, direction, start_str, end_str)
-
-
-def history_split(start, today):
-    """First day of the 'current' period; everything before it is history."""
-    return max(start, date((today - timedelta(days=YEAR_GRACE_DAYS)).year, 1, 1))
-
-
-def load_all(start, split, end):
-    frames, failed, dupes = [], [], 0
-    # History is fetched from 1 January of the window's first year, so its cache
-    # key stays the same when the rolling 24-month window moves forward a month.
-    hist_start = date(start.year, 1, 1)
-    hist_end = split - timedelta(days=1)
-    bar = st.progress(0.0, text="Loading ENTSOG data...")
-    for i, (grp, op, pt, d, label) in enumerate(SERIES):
-        bar.progress(i / len(SERIES), text=f"Loading {label} ({i + 1}/{len(SERIES)})")
-        try:
-            days, n = {}, 0
-            if split > start:
-                h = fetch_series_history(op, pt, d, hist_start.isoformat(),
-                                         hist_end.isoformat())
-                days.update(h["days"])
-                n += h["dupes"]
-            c = fetch_series_current(op, pt, d, split.isoformat(), end.isoformat())
-            days.update(c["days"])
-            n += c["dupes"]
-        except Exception as e:
-            failed.append(f"{label} [{op} {pt} {d}]: {e}")
-            continue
-        dupes += n
+# ---------------------------------------------------------------- data load
+def load_all(start, end, force_live=False):
+    """Stored data (updated every evening), topped up live from ENTSOG if needed."""
+    flows, failed_keys, dupes, info = load_flows(start, end, force_live)
+    failed = [f"Stored file: {failed_keys[None]}"] if None in failed_keys else []
+    frames = []
+    for grp, op, pt, d, label in SERIES:
+        if (op, pt, d) in failed_keys:
+            failed.append(f"{label} [{op} {pt} {d}]: {failed_keys[(op, pt, d)]}")
+        days = flows.get((op, pt, d), {})
         if days:
             frames.append(pd.DataFrame({
                 "day": list(days.keys()),
@@ -173,12 +48,11 @@ def load_all(start, split, end):
                 "group": grp,
                 "series": f"{grp}: {label}",
             }))
-    bar.empty()
     if frames:
         raw = pd.concat(frames, ignore_index=True)
     else:
         raw = pd.DataFrame(columns=["day", "TWh", "group", "series"])
-    return raw, failed, dupes
+    return raw, failed, dupes, info
 
 
 def build_monthly(raw):
@@ -208,27 +82,29 @@ st.markdown(
 
 st.sidebar.header("Settings")
 months_to_show = st.sidebar.slider("Time period (months):", 3, 24, 12, 1)
-if st.sidebar.button("Refresh current year 🔄"):
-    fetch_series_current.clear()
-    st.rerun()
-if st.sidebar.button("Clear all cache (incl. history)"):
+if st.sidebar.button("Fetch latest from ENTSOG 🔄"):
+    fetch_live.clear()
+    # Kept for the session, so the live data stays when other settings change.
+    st.session_state["force_live"] = True
+if st.sidebar.button("Clear cache"):
     st.cache_data.clear()
     st.rerun()
 st.sidebar.caption(
-    "History years are cached for 30 days, the current year for 6 hours. "
-    "Series that fail to load are retried on the next refresh; successful "
-    "ones stay cached."
+    "Data is fetched from ENTSOG into the repository every evening, so the app "
+    "opens without waiting for the API. ENTSOG publishes each gas day on the "
+    "following day."
 )
+force_live = st.session_state.get("force_live", False)
 
 today = date.today()
 start_date = (pd.Timestamp(today.replace(day=1)) - pd.DateOffset(months=24)).date()
-split = history_split(start_date, today)
-raw, failed, dupes = load_all(start_date, split, today)
+# Stored history starts on 1 January of the window's first year.
+raw, failed, dupes, info = load_all(date(start_date.year, 1, 1), today, force_live)
 
 if failed:
     st.warning(
         "Some ENTSOG series could not be loaded, so the figures below may be "
-        "incomplete. Press the refresh button to retry (the rest is cached)."
+        "incomplete. Press \"Fetch latest from ENTSOG\" to retry."
     )
     with st.expander("Failed series"):
         for f in failed:
@@ -319,15 +195,14 @@ with st.expander("Method and caveats"):
   so they can only be cross-checked together (the sum of the two consumption points
   matched the combined balance closely when checked).
 - The latest month is incomplete until the month ends.
-- History years are cached for 30 days, so a revision ENTSOG makes to old data
-  shows up only after that (or after "Clear all cache").
+- The whole period is re-fetched every evening, so ENTSOG's revisions to old
+  days show up the next day.
         """
     )
 
 with st.expander("Data quality"):
     st.write(f"Duplicate daily records dropped: {dupes}")
-    st.write(f"Cached as history (30 days): before {split}. "
-             f"Current (6 hours): {split} onwards.")
+    st.write(source_text(info))
     tail_months = sorted(raw["day"].str[:7].unique())[-months_to_show:]
     sub = raw[raw["day"].str[:7].isin(tail_months)].copy()
     sub["Month"] = sub["day"].str[:7]
